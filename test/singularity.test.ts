@@ -17,6 +17,8 @@ import {
   ingestSyncDelta,
   buildLeaderboard,
   buildStats,
+  cacheFactSigningString,
+  nodeIdFromDigest,
   isCacheTrusted,
   isFresh,
   isNodeBarred,
@@ -628,6 +630,28 @@ console.log("buildLeaderboard");
   ok(typeof lb[0].ageDays === "number" && lb[0].ageDays === 10, "computes ageDays from created_at");
   const blob = JSON.stringify(lb).toLowerCase();
   ok(!blob.includes("secretkey") && !blob.includes("pubkey"), "no pubkey/secret in the leaderboard");
+}
+
+// --- VortX hive canonical contract: CacheFact signing bytes match the engine's conformance vectors ---
+console.log("cacheFactSigningString (vortx-core crates/hive conformance vectors)");
+{
+  // mirrored verbatim from vortx-core crates/hive/conformance/cachefact_signing_vectors.json
+  const vectors = [
+    { infohash: "aabbccddeeff00112233445566778899aabbccdd", service: "realdebrid", cached: true, file_idx: 3, size: 2147483648, quality: "1080p", verified_at: 1718900000, ttl: 86400, signer_pubkey: "PUBKEY", expected: "vortx-cachefact-v1\naabbccddeeff00112233445566778899aabbccdd|realdebrid|1|3|2147483648|1080p|1718900000|86400|PUBKEY" },
+    { infohash: "aabbccddeeff00112233445566778899aabbccdd", service: "torbox", cached: false, file_idx: null, size: null, quality: null, verified_at: 10, ttl: 20, signer_pubkey: "K", expected: "vortx-cachefact-v1\naabbccddeeff00112233445566778899aabbccdd|torbox|0|-1|||10|20|K" },
+    { infohash: "aabbccddeeff00112233445566778899aabbccdd", service: "alldebrid", cached: true, file_idx: 0, size: null, quality: "2160p", verified_at: 1000000000, ttl: 3600, signer_pubkey: "abc-DEF_123", expected: "vortx-cachefact-v1\naabbccddeeff00112233445566778899aabbccdd|alldebrid|1|0||2160p|1000000000|3600|abc-DEF_123" },
+    { infohash: "aabbccddeeff00112233445566778899aabbccdd", service: "dmm_public", cached: true, file_idx: null, size: 500, quality: null, verified_at: 42, ttl: 99, signer_pubkey: "z", expected: "vortx-cachefact-v1\naabbccddeeff00112233445566778899aabbccdd|dmm_public|1|-1|500||42|99|z" },
+    { infohash: "1122334455667788990011223344556677889900", service: "premiumize", cached: true, file_idx: 7, size: 19783847234, quality: "2160p", verified_at: 1718000123, ttl: 21600, signer_pubkey: "Zm9vYmFy", expected: "vortx-cachefact-v1\n1122334455667788990011223344556677889900|premiumize|1|7|19783847234|2160p|1718000123|21600|Zm9vYmFy" },
+  ];
+  let allMatch = true;
+  for (const v of vectors) {
+    const got = cacheFactSigningString({ infohash: v.infohash, service: v.service, cached: v.cached, fileIdx: v.file_idx, size: v.size, quality: v.quality, verifiedAt: v.verified_at, ttl: v.ttl, signerPubkey: v.signer_pubkey });
+    if (got !== v.expected) { allMatch = false; console.log("    MISMATCH", v.service, JSON.stringify(got)); }
+  }
+  ok(allMatch, "cacheFactSigningString matches all 5 engine conformance vectors byte-for-byte");
+  // nodeIdFromDigest: 16 zero bytes -> 22 'A's (base64url no-pad); shape + length
+  const id = nodeIdFromDigest(new Uint8Array(32));
+  ok(id === "A".repeat(22) && /^[A-Za-z0-9_-]{22}$/.test(id), "nodeIdFromDigest = base64url(no-pad) of the first 16 digest bytes (22 chars)");
 }
 
 // --- public stats snapshot (aggregate counts only; safe coercion) ---

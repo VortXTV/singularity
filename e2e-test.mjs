@@ -24,8 +24,9 @@ async function newNode() {
   return { kp, pubKey: b64(pubRaw) };
 }
 async function nodeIdOf(pubKeyB64) {
+  // matches vortx-core crates/hive/src/identity.rs: base64url(no-pad) of SHA-256(pubkey)[..16]
   const h = new Uint8Array(await subtle.digest("SHA-256", new Uint8Array(Buffer.from(pubKeyB64, "base64"))));
-  return [...h].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return Buffer.from(h.slice(0, 16)).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 async function contribute(node, facts) {
   const ts = Date.now();

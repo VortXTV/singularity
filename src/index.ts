@@ -27,6 +27,7 @@ import {
   isNodeBarred,
   buildManifest,
   buildNativeManifest,
+  nodeIdFromDigest,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -121,8 +122,12 @@ async function readJSON(req: Request, maxBytes = 1024 * 1024): Promise<Record<st
   }
 }
 
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource)));
+// nodeId = the engine's short id, base64url(SHA-256(pubkey)[..16]) (crates/hive/src/identity.rs), so the
+// Worker and the vortx-core hive client agree on node identity / quorum dedup. Derived from the public key
+// server-side so a node cannot claim another node's id.
+async function nodeIdFromPubkey(pubkeyBytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", pubkeyBytes as BufferSource));
+  return nodeIdFromDigest(digest);
 }
 
 // A node proves identity with an Ed25519 keypair. nodeId is derived from the public key server-side so
@@ -139,7 +144,7 @@ async function verifyNode(
     const key = await crypto.subtle.importKey("raw", unb64(pubKeyB64) as BufferSource, { name: "Ed25519" }, false, ["verify"]);
     const ok = await crypto.subtle.verify({ name: "Ed25519" }, key, unb64(sigB64) as BufferSource, enc(`${ts}.${factsJson}`));
     if (!ok) return null;
-    return await sha256Hex(unb64(pubKeyB64));
+    return await nodeIdFromPubkey(unb64(pubKeyB64));
   } catch {
     return null;
   }
@@ -489,10 +494,11 @@ async function handleReport(req: Request, env: Env, ip: string): Promise<Respons
   // under; a 32-hex nzb hash falls through unchanged so a report still matches its claim either way.
   const infoHash = normalizeInfoHash(rawHash) ?? rawHash;
   const service = typeof body.service === "string" ? body.service.toLowerCase() : "";
-  const reporter = typeof body.reporter === "string" ? body.reporter.toLowerCase() : "";
-  // reporter must be a real node id (sha256(pubkey) = 64 hex) that EXISTS, so a report cannot be forged
-  // against an arbitrary node id (anti-griefing). hash is a 40-hex torrent btih OR a 32-hex nzb hash.
-  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(infoHash) || !/^[a-z0-9]{2,24}$/.test(service) || !/^[a-f0-9]{64}$/.test(reporter)) {
+  // reporter is a base64url node id (case-sensitive - do NOT lowercase) = base64url(SHA-256(pubkey)[..16]).
+  const reporter = typeof body.reporter === "string" ? body.reporter : "";
+  // reporter must be a real node id that EXISTS, so a report cannot be forged against an arbitrary node id
+  // (anti-griefing). hash is a 40-hex torrent btih OR a 32-hex nzb hash.
+  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(infoHash) || !/^[a-z0-9]{2,24}$/.test(service) || !/^[A-Za-z0-9_-]{22}$/.test(reporter)) {
     return json({ error: "bad_request" }, 400);
   }
   const node = await env.DB.prepare("SELECT 1 AS ok FROM nodes WHERE id = ?").bind(reporter).first<{ ok: number }>();

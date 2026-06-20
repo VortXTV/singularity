@@ -779,6 +779,58 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
 type Row = Record<string, unknown>;
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
+// ---- VortX hive canonical contract (frozen against vortx-core crates/hive) ----
+// These pure primitives match the engine's hive crate BYTE-FOR-BYTE so the federation plane is VortX-native.
+// Conformance is pinned by the engine's crates/hive/conformance/cachefact_signing_vectors.json (mirrored in
+// the unit tests). The actual Ed25519 sign/verify + SHA-256 happen in the Worker (WebCrypto); these build the
+// exact bytes those operate over.
+
+export const CACHEFACT_PREFIX = "vortx-cachefact-v1\n"; // domain-separation prefix (crates/hive hive_constants)
+// Debrid service wire strings, identical to the engine's DebridService enum (fact.rs). dmm_public is advisory.
+export const HIVE_DEBRID_SERVICES = ["realdebrid", "alldebrid", "premiumize", "torbox", "debridlink", "easydebrid", "dmm_public"];
+
+export interface CacheFactInput {
+  infohash: string;
+  service: string;
+  cached: boolean;
+  fileIdx?: number | null;
+  size?: number | null;
+  quality?: string | null;
+  verifiedAt: number;
+  ttl: number;
+  signerPubkey: string; // base64url(no-pad) of the 32-byte ed25519 verifying key
+}
+
+/**
+ * The exact canonical byte-string the engine signs PER cache fact (crates/hive/src/fact.rs signing_bytes_for):
+ * prefix + "infohash|service|cached(1/0)|file_idx(-1 if none)|size(empty if none)|quality(empty if none)|
+ * verified_at|ttl|signer_pubkey". Absent optionals use the sentinels (-1 / empty) so an absent and an empty
+ * value are byte-identical. NOT JSON (key order / number formatting would be undefined). Ed25519-signed over
+ * the UTF-8 of this string; the signer_pubkey rides INSIDE the signed bytes.
+ */
+export function cacheFactSigningString(f: CacheFactInput): string {
+  const fileIdx = f.fileIdx == null ? "-1" : String(Math.floor(f.fileIdx));
+  const size = f.size == null ? "" : String(Math.floor(f.size));
+  const quality = f.quality ?? "";
+  return CACHEFACT_PREFIX + [f.infohash, f.service, f.cached ? "1" : "0", fileIdx, size, quality, f.verifiedAt, f.ttl, f.signerPubkey].join("|");
+}
+
+function base64urlNoPad(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * The engine's short node id (crates/hive/src/identity.rs node_id_from_pubkey_bytes): base64url(no-pad) of
+ * the FIRST 16 bytes of SHA-256(pubkey). The caller supplies the full SHA-256 digest (computed via WebCrypto
+ * in the Worker); this stays pure so it is unit-testable. Quorum dedup keys on this id, so the Worker MUST
+ * agree with the engine here or the two will disagree on who a node is.
+ */
+export function nodeIdFromDigest(sha256Digest: Uint8Array): string {
+  return base64urlNoPad(sha256Digest.slice(0, 16));
+}
+
 export interface SyncDelta {
   since: number;
   cursor: number; // max timestamp seen; the node re-requests from here next
