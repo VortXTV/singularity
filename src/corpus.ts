@@ -30,6 +30,7 @@ export interface CleanFact {
   cached: boolean;
   seeders: number | null;
   fileIdx: number | null;
+  tags: string[];
 }
 
 const HEX40 = /^[a-f0-9]{40}$/;
@@ -44,6 +45,29 @@ function matchOrNull(v: unknown, re: RegExp): string | null {
 }
 function asInt(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null;
+}
+
+// Normalized release-tag vocabulary (visual / audio / encode / junk). Contributors send these canonical
+// slugs; anything else is dropped. Filters (hdrOnly, excludeCam) and the title read from this set.
+const KNOWN_TAGS = new Set([
+  "hdr", "hdr10", "hdr10plus", "dv", "hlg", "10bit", "3d", "imax", "sdr", "remux",
+  "atmos", "truehd", "dtshd", "dts", "ddp", "dd", "aac", "flac", "opus",
+  "av1", "hevc", "h265", "avc", "h264", "xvid",
+  "cam", "ts", "hdcam", "hdts", "scr", "telesync",
+]);
+const HDR_TAGS = new Set(["hdr", "hdr10", "hdr10plus", "dv", "hlg"]);
+const CAM_TAGS = new Set(["cam", "ts", "hdcam", "hdts", "scr", "telesync"]);
+const MAX_TAGS = 12;
+
+/** Keep only known release tags, lowercased + de-duped (max MAX_TAGS). Untrusted input -> safe slug list. */
+export function sanitizeTags(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const x of v) {
+    const s = typeof x === "string" ? x.toLowerCase().replace(/\+/g, "plus").replace(/[^a-z0-9]/g, "") : "";
+    if (KNOWN_TAGS.has(s) && !out.includes(s) && out.length < MAX_TAGS) out.push(s);
+  }
+  return out;
 }
 
 /**
@@ -63,6 +87,7 @@ export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | 
     cached: raw.cached === true,
     seeders: asInt(raw.seeders),
     fileIdx: asInt(raw.fileIdx),
+    tags: sanitizeTags(raw.tags),
   };
 }
 
@@ -97,6 +122,7 @@ export interface CleanHttpFact {
   quality: string | null;
   size: number | null;
   source: string | null;
+  tags: string[];
 }
 /**
  * Reduce an HTTP/direct contribution to a STABLE PUBLIC stream fact, or null. The federation rule is
@@ -116,6 +142,7 @@ export function sanitizeHttpFact(raw: Record<string, unknown>): CleanHttpFact | 
     quality: matchOrNull(raw.quality, QUALITY_RE),
     size: asInt(raw.size),
     source: matchOrNull(raw.source, SOURCE_RE),
+    tags: sanitizeTags(raw.tags),
   };
 }
 
@@ -126,6 +153,7 @@ export interface CleanNzbFact {
   source: string | null;
   service: string | null;
   cached: boolean;
+  tags: string[];
 }
 /**
  * Reduce an NZB/Usenet contribution to facts, or null. We store the nzb hash + which usenet service has
@@ -142,6 +170,7 @@ export function sanitizeNzbFact(raw: Record<string, unknown>): CleanNzbFact | nu
     source: matchOrNull(raw.source, SOURCE_RE),
     service: matchOrNull(typeof raw.service === "string" ? raw.service.toLowerCase() : raw.service, SERVICE_RE),
     cached: raw.cached === true,
+    tags: sanitizeTags(raw.tags),
   };
 }
 
@@ -228,6 +257,7 @@ export interface CorpusStream {
   trusted: boolean; // source-level trust (>=3 nodes or own debrid)
   lastVerified: number; // epoch ms of the freshest fact backing this row
   fileIdx?: number | null;
+  tags?: string[]; // normalized release tags (hdr/dv/atmos/hevc/cam/...)
 }
 
 // A Stremio stream object. A torrent carries `infoHash` (the client mints the magnet / resolves debrid
@@ -264,7 +294,7 @@ function humanSize(bytes: number | null): string {
 function streamTitle(s: CorpusStream): string {
   const kind = kindOf(s);
   const badge = kind === "http" ? "HTTP " : kind === "nzb" ? "NZB " : "";
-  const head = `${badge}${[s.quality || "SD", humanSize(s.size)].filter(Boolean).join(" • ")}`;
+  const head = `${badge}${[s.quality || "SD", humanSize(s.size), (s.tags ?? []).map((t) => t.toUpperCase()).join(" ")].filter(Boolean).join(" • ")}`;
   const tags: string[] = [];
   if (s.cachedOn.length) tags.push(`⚡ Cached: ${s.cachedOn.map((x) => SERVICE_LABELS[x] || x).join(", ")}`);
   if (s.seeders && s.seeders > 0) tags.push(`🌱 ${s.seeders}`);
@@ -280,6 +310,8 @@ export interface StreamFilterOptions {
   excludeRegex?: string; // drop sources whose "source quality" text matches
   minSeeders?: number; // torrents only
   maxSizeGB?: number;
+  hdrOnly?: boolean; // keep only HDR/DV/HLG-tagged sources
+  excludeCam?: boolean; // drop CAM/TS-tagged sources
   sort?: string[]; // ordered keys: cached | resolution | seeders | size
 }
 
@@ -301,6 +333,8 @@ function applyFilters(streams: CorpusStream[], opts: StreamFilterOptions): Corpu
     if (opts.maxSizeGB && opts.maxSizeGB > 0 && s.size != null && s.size > opts.maxSizeGB * 1e9) return false;
     if (opts.minSeeders && opts.minSeeders > 0 && kindOf(s) === "torrent" && (s.seeders ?? 0) < opts.minSeeders) return false;
     if (re && re.test(`${s.source ?? ""} ${s.quality ?? ""}`)) return false;
+    if (opts.hdrOnly && !(s.tags ?? []).some((t) => HDR_TAGS.has(t))) return false;
+    if (opts.excludeCam && (s.tags ?? []).some((t) => CAM_TAGS.has(t))) return false;
     return true;
   });
 }

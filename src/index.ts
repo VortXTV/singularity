@@ -140,20 +140,20 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
   // The corpus serves three kinds for a title: torrents, direct/HTTP public streams, and NZB/Usenet.
   // (LIMITs keep the cache IN-clause below D1's 100 bound-parameter cap: 50 torrent + 30 nzb hashes = 80.)
   const torrents = (
-    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
+    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, tags, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
       .bind(metaId)
-      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; added_at: number }>()
+      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; added_at: number }>()
   ).results ?? [];
   const httpRows = (
     // Only HTTP URLs confirmed by >= MIN_CONFIRMATIONS distinct nodes are surfaced (gated like the cache).
-    await env.DB.prepare("SELECT url, quality, size, source, added_at FROM http_streams WHERE meta_id = ? AND confirmations >= ? LIMIT 30")
+    await env.DB.prepare("SELECT url, quality, size, source, tags, added_at FROM http_streams WHERE meta_id = ? AND confirmations >= ? LIMIT 30")
       .bind(metaId, MIN_CONFIRMATIONS)
-      .all<{ url: string; quality: string | null; size: number | null; source: string | null; added_at: number }>()
+      .all<{ url: string; quality: string | null; size: number | null; source: string | null; tags: string | null; added_at: number }>()
   ).results ?? [];
   const nzbRows = (
-    await env.DB.prepare("SELECT nzb_hash, quality, size, source, added_at FROM nzbs WHERE meta_id = ? LIMIT 30")
+    await env.DB.prepare("SELECT nzb_hash, quality, size, source, tags, added_at FROM nzbs WHERE meta_id = ? LIMIT 30")
       .bind(metaId)
-      .all<{ nzb_hash: string; quality: string | null; size: number | null; source: string | null; added_at: number }>()
+      .all<{ nzb_hash: string; quality: string | null; size: number | null; source: string | null; tags: string | null; added_at: number }>()
   ).results ?? [];
   if (torrents.length === 0 && httpRows.length === 0 && nzbRows.length === 0) return json({ streams: [] }, 200, true);
 
@@ -207,13 +207,14 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
       trusted: true,
       lastVerified: Math.max(r.added_at, h?.last_seen ?? 0),
       fileIdx: r.file_idx,
+      tags: r.tags ? r.tags.split(",") : [],
     });
   }
   for (const r of httpRows) {
-    corpus.push({ kind: "http", url: r.url, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: [], trusted: true, lastVerified: r.added_at });
+    corpus.push({ kind: "http", url: r.url, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: [], trusted: true, lastVerified: r.added_at, tags: r.tags ? r.tags.split(",") : [] });
   }
   for (const r of nzbRows) {
-    corpus.push({ kind: "nzb", nzbHash: r.nzb_hash, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: (cacheByHash.get(r.nzb_hash) ?? []).filter(allowUsenet), trusted: true, lastVerified: r.added_at });
+    corpus.push({ kind: "nzb", nzbHash: r.nzb_hash, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: (cacheByHash.get(r.nzb_hash) ?? []).filter(allowUsenet), trusted: true, lastVerified: r.added_at, tags: r.tags ? r.tags.split(",") : [] });
   }
 
   const opts = config
@@ -222,6 +223,8 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         excludeRegex: config.filters.excludeRegex || undefined,
         minSeeders: config.filters.minSeeders,
         maxSizeGB: config.filters.maxSizeGB,
+        hdrOnly: config.filters.hdrOnly,
+        excludeCam: config.filters.excludeCam,
         sort: config.sort,
       }
     : undefined;
@@ -317,11 +320,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
       const hf = sanitizeHttpFact(raw);
       if (!hf) continue;
       await env.DB.prepare(
-        "INSERT INTO http_streams (url, meta_id, quality, size, source, confirmations, added_at) VALUES (?, ?, ?, ?, ?, 0, ?) " +
+        "INSERT INTO http_streams (url, meta_id, quality, size, source, tags, confirmations, added_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?) " +
           "ON CONFLICT(url, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, http_streams.quality), " +
-          "size = COALESCE(excluded.size, http_streams.size), source = COALESCE(excluded.source, http_streams.source), added_at = excluded.added_at",
+          "size = COALESCE(excluded.size, http_streams.size), source = COALESCE(excluded.source, http_streams.source), " +
+          "tags = COALESCE(excluded.tags, http_streams.tags), added_at = excluded.added_at",
       )
-        .bind(hf.url, metaId, hf.quality, hf.size, hf.source, now)
+        .bind(hf.url, metaId, hf.quality, hf.size, hf.source, hf.tags.length ? hf.tags.join(",") : null, now)
         .run();
       await recordHttpConfirmation(env, hf.url, metaId, nodeId, now);
       accepted++;
@@ -333,11 +337,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
       const nf = sanitizeNzbFact(raw);
       if (!nf) continue;
       await env.DB.prepare(
-        "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, added_at) VALUES (?, ?, ?, ?, ?, ?) " +
+        "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, tags, added_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT(nzb_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, nzbs.quality), " +
-          "size = COALESCE(excluded.size, nzbs.size), source = COALESCE(excluded.source, nzbs.source), added_at = excluded.added_at",
+          "size = COALESCE(excluded.size, nzbs.size), source = COALESCE(excluded.source, nzbs.source), " +
+          "tags = COALESCE(excluded.tags, nzbs.tags), added_at = excluded.added_at",
       )
-        .bind(nf.nzbHash, metaId, nf.quality, nf.size, nf.source, now)
+        .bind(nf.nzbHash, metaId, nf.quality, nf.size, nf.source, nf.tags.length ? nf.tags.join(",") : null, now)
         .run();
       if (nf.service && nf.cached) await recordCache(env, nf.nzbHash, nf.service, nodeId, now);
       accepted++;
@@ -349,12 +354,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     if (!clean) continue;
     // 1) torrent association (infohash serves this title)
     await env.DB.prepare(
-      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, added_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(info_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, torrents.quality), " +
         "size = COALESCE(excluded.size, torrents.size), source = COALESCE(excluded.source, torrents.source), " +
-        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), added_at = excluded.added_at",
+        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), added_at = excluded.added_at",
     )
-      .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, now)
+      .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, now)
       .run();
     // 2) live swarm health (re-scraped each time; freshest wins)
     if (clean.seeders != null) {
