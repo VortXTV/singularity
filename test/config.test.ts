@@ -55,7 +55,7 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
     debridServices: ["torbox", "EVIL!", "realdebrid", "torbox"], // unknown dropped, dupes collapsed, lowercased
     usenetServices: ["easynews", "nope"],
     addons: ["https://ok.example/manifest.json", "ftp://bad", "not a url"],
-    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"] },
+    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"] },
     sort: ["cached", "seeders", "boguskey"],
     recommendations: { enabled: true, historySource: "myspace" }, // invalid source -> default
     // secret-looking junk that MUST be dropped:
@@ -69,6 +69,8 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
   ok(v.addons.length === 1 && v.addons[0].startsWith("https://"), "keeps only valid http(s) add-on URLs");
   ok(v.filters.minSeeders >= 0 && v.filters.maxSizeGB <= 200, "clamps ranges");
   ok(v.filters.resolutions.includes("2160p") && !v.filters.resolutions.includes("haxx"), "drops unknown resolution");
+  ok(v.filters.includeTags.includes("atmos") && v.filters.includeTags.includes("hevc") && !v.filters.includeTags.includes("NOPE"), "keeps known include tags, drops unknown");
+  ok(v.filters.excludeTags.includes("av1") && !v.filters.excludeTags.includes("junk"), "keeps known exclude tags, drops unknown");
   ok(!v.sort.includes("boguskey"), "drops unknown sort key");
   ok(["library", "trakt", "simkl"].includes(v.recommendations.historySource), "normalizes recommendations history source");
   const blob = JSON.stringify(v).toLowerCase();
@@ -104,6 +106,7 @@ console.log("renderConfigurePage (VortX visual, no rival names)");
   ok(html.includes("#D97706") || html.includes("#d97706"), "uses the VortX gold accent token");
   ok(html.includes("#15120E") || html.includes("#15120e"), "uses the VortX canvas token");
   ok(/Debrid/i.test(html) && /Usenet/i.test(html) && /Filters/i.test(html) && /Ratings/i.test(html) && /Recommendations/i.test(html), "renders all feature sections");
+  ok(/Quality tags/i.test(html) && /includeTags/.test(html) && /excludeTags/.test(html), "renders the per-tag include/exclude section");
   ok(/Singularity/.test(html), "branded Singularity");
 }
 

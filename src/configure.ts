@@ -9,6 +9,11 @@ import {
   FORMAT_PRESETS, HISTORY_SOURCES, DEFAULT_CONFIG,
 } from "./config.ts";
 
+// Curated user-facing tag choices (visual / audio / encode; CAM/junk is handled by the Exclude-CAM toggle).
+const TAG_CHOICES = ["hdr", "dv", "hdr10plus", "hlg", "10bit", "imax", "remux", "atmos", "truehd", "dtshd", "dts", "ddp", "flac", "av1", "hevc", "avc", "xvid"];
+const tagChips = (group: string) =>
+  TAG_CHOICES.map((t) => `<label class="chip"><input type="checkbox" data-group="${group}" value="${t}"><span>${t.toUpperCase()}</span></label>`).join("");
+
 const LABELS: Record<string, string> = {
   realdebrid: "Real-Debrid", alldebrid: "AllDebrid", premiumize: "Premiumize", debridlink: "Debrid-Link",
   torbox: "TorBox", offcloud: "Offcloud", putio: "put.io", easydebrid: "EasyDebrid", debrider: "Debrider",
@@ -122,6 +127,12 @@ export function renderConfigurePage(baseUrl: string): string {
   </div>
 </section>
 
+<section class="card"><h2>Quality tags</h2>
+  <p class="hint">Fine-grained audio / video / encode control. Include = keep only sources carrying at least one; Exclude = drop any source that has one.</p>
+  <div class="field"><span class="lbl">Include (any of)</span><div class="chips">${tagChips("includeTags")}</div></div>
+  <div class="field" style="margin-top:14px"><span class="lbl">Exclude</span><div class="chips">${tagChips("excludeTags")}</div></div>
+</section>
+
 <section class="card"><h2>Sort &amp; format</h2>
   <p class="hint">Rank order (strongest first) and how each result reads.</p>
   <div class="field"><span class="lbl">Sort keys</span><div class="grid">${sortRows}</div></div>
@@ -163,6 +174,7 @@ export function renderConfigurePage(baseUrl: string): string {
         minSeeders: Math.max(0, parseInt(document.getElementById('minSeeders').value||'0',10)||0),
         maxSizeGB: Math.min(200, Math.max(0, parseInt(document.getElementById('maxSizeGB').value||'100',10)||100)),
         hdrOnly: document.getElementById('hdrOnly').checked, excludeCam: document.getElementById('excludeCam').checked,
+        includeTags: vals('includeTags'), excludeTags: vals('excludeTags'),
       },
       sort: vals('sort'),
       format: document.getElementById('format').value,

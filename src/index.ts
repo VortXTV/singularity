@@ -225,6 +225,8 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         maxSizeGB: config.filters.maxSizeGB,
         hdrOnly: config.filters.hdrOnly,
         excludeCam: config.filters.excludeCam,
+        includeTags: config.filters.includeTags,
+        excludeTags: config.filters.excludeTags,
         sort: config.sort,
       }
     : undefined;

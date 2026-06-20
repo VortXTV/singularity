@@ -49,12 +49,13 @@ function asInt(v: unknown): number | null {
 
 // Normalized release-tag vocabulary (visual / audio / encode / junk). Contributors send these canonical
 // slugs; anything else is dropped. Filters (hdrOnly, excludeCam) and the title read from this set.
-const KNOWN_TAGS = new Set([
+export const KNOWN_TAGS_LIST = [
   "hdr", "hdr10", "hdr10plus", "dv", "hlg", "10bit", "3d", "imax", "sdr", "remux",
   "atmos", "truehd", "dtshd", "dts", "ddp", "dd", "aac", "flac", "opus",
   "av1", "hevc", "h265", "avc", "h264", "xvid",
   "cam", "ts", "hdcam", "hdts", "scr", "telesync",
-]);
+];
+const KNOWN_TAGS = new Set(KNOWN_TAGS_LIST);
 const HDR_TAGS = new Set(["hdr", "hdr10", "hdr10plus", "dv", "hlg"]);
 const CAM_TAGS = new Set(["cam", "ts", "hdcam", "hdts", "scr", "telesync"]);
 const MAX_TAGS = 12;
@@ -312,6 +313,8 @@ export interface StreamFilterOptions {
   maxSizeGB?: number;
   hdrOnly?: boolean; // keep only HDR/DV/HLG-tagged sources
   excludeCam?: boolean; // drop CAM/TS-tagged sources
+  includeTags?: string[]; // keep only sources carrying AT LEAST ONE of these tags
+  excludeTags?: string[]; // drop sources carrying ANY of these tags
   sort?: string[]; // ordered keys: cached | resolution | seeders | size
 }
 
@@ -335,6 +338,8 @@ function applyFilters(streams: CorpusStream[], opts: StreamFilterOptions): Corpu
     if (re && re.test(`${s.source ?? ""} ${s.quality ?? ""}`)) return false;
     if (opts.hdrOnly && !(s.tags ?? []).some((t) => HDR_TAGS.has(t))) return false;
     if (opts.excludeCam && (s.tags ?? []).some((t) => CAM_TAGS.has(t))) return false;
+    if (opts.includeTags && opts.includeTags.length > 0 && !(s.tags ?? []).some((t) => opts.includeTags!.includes(t))) return false;
+    if (opts.excludeTags && opts.excludeTags.length > 0 && (s.tags ?? []).some((t) => opts.excludeTags!.includes(t))) return false;
     return true;
   });
 }

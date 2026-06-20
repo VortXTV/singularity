@@ -10,7 +10,7 @@
  * Config travels in the add-on URL path: GET /:config/manifest.json, /:config/stream/..., /:config/
  * catalog/... where :config = base64url(JSON(SingularityConfig)).
  */
-import { buildManifest, type Manifest } from "./corpus.ts";
+import { buildManifest, KNOWN_TAGS_LIST, type Manifest } from "./corpus.ts";
 
 // Debrid services the user can plug their own account into (keys live in the VortX account, never here).
 export const DEBRID_SERVICES = [
@@ -37,6 +37,8 @@ export interface SingularityFilters {
   maxSizeGB: number;
   hdrOnly: boolean;
   excludeCam: boolean;
+  includeTags: string[]; // keep only sources carrying at least one of these tags (audio/encode/visual)
+  excludeTags: string[]; // drop sources carrying any of these tags
 }
 export interface SingularityConfig {
   debridServices: string[]; // which services you use (keys are in your VortX account, NOT here)
@@ -54,7 +56,7 @@ export const DEFAULT_CONFIG: SingularityConfig = {
   debridServices: [],
   usenetServices: [],
   addons: [],
-  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true },
+  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [] },
   sort: ["cached", "resolution", "seeders"],
   format: "standard",
   proxyEnabled: false,
@@ -106,6 +108,8 @@ export function validateConfig(raw: unknown): SingularityConfig {
       maxSizeGB: clamp(f.maxSizeGB, 0, MAX_SIZE_GB, 100),
       hdrOnly: bool(f.hdrOnly, false),
       excludeCam: bool(f.excludeCam, true),
+      includeTags: pickKnown(f.includeTags, KNOWN_TAGS_LIST, false),
+      excludeTags: pickKnown(f.excludeTags, KNOWN_TAGS_LIST, false),
     },
     sort: pickKnown(r.sort, SORT_KEYS),
     format,
