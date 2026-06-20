@@ -836,3 +836,28 @@ export function buildLeaderboard(rows: Row[], now: number): LeaderboardEntry[] {
       ageDays: Math.round((now - num(r.created_at)) / day),
     }));
 }
+
+export interface CorpusStats {
+  nodes: { total: number; active: number; banned: number };
+  corpus: { titles: number; torrents: number; httpStreams: number; nzbs: number };
+  cache: { facts: number; cachedTrusted: number };
+  reports: number;
+  peers: number;
+}
+
+/**
+ * Public federation health/transparency snapshot (the data the dashboard Nodes UI reads, and a credibility
+ * surface like CometNet's). AGGREGATE COUNTS ONLY - never a node id, pubkey, title, or any fact - so it is a
+ * safe public, edge-cacheable response. Pure shaping: every count is coerced to a non-negative integer so a
+ * NULL/garbage SUM (e.g. an empty table) renders as 0, never null.
+ */
+export function buildStats(raw: Record<string, unknown>): CorpusStats {
+  const n = (v: unknown): number => Math.max(0, Math.floor(num(v)));
+  return {
+    nodes: { total: n(raw.nodesTotal), active: n(raw.nodesActive), banned: n(raw.nodesBanned) },
+    corpus: { titles: n(raw.titles), torrents: n(raw.torrents), httpStreams: n(raw.httpStreams), nzbs: n(raw.nzbs) },
+    cache: { facts: n(raw.cacheFacts), cachedTrusted: n(raw.cacheTrusted) },
+    reports: n(raw.reports),
+    peers: n(raw.peers),
+  };
+}

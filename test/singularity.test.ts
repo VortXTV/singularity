@@ -16,6 +16,7 @@ import {
   assembleSyncDelta,
   ingestSyncDelta,
   buildLeaderboard,
+  buildStats,
   isCacheTrusted,
   isFresh,
   isNodeBarred,
@@ -609,6 +610,19 @@ console.log("buildLeaderboard");
   ok(typeof lb[0].ageDays === "number" && lb[0].ageDays === 10, "computes ageDays from created_at");
   const blob = JSON.stringify(lb).toLowerCase();
   ok(!blob.includes("secretkey") && !blob.includes("pubkey"), "no pubkey/secret in the leaderboard");
+}
+
+// --- public stats snapshot (aggregate counts only; safe coercion) ---
+console.log("buildStats");
+{
+  const s = buildStats({ nodesTotal: 12, nodesActive: 9, nodesBanned: 1, titles: 340, torrents: 1500, httpStreams: 20, nzbs: 8, cacheFacts: 600, cacheTrusted: 210, reports: 4, peers: 3 });
+  ok(s.nodes.total === 12 && s.nodes.active === 9 && s.nodes.banned === 1, "shapes node counts");
+  ok(s.corpus.titles === 340 && s.corpus.torrents === 1500 && s.corpus.httpStreams === 20 && s.corpus.nzbs === 8, "shapes corpus counts");
+  ok(s.cache.facts === 600 && s.cache.cachedTrusted === 210 && s.reports === 4 && s.peers === 3, "shapes cache/report/peer counts");
+  // a NULL SUM (empty table) or garbage must coerce to 0, never null/NaN
+  const empty = buildStats({ nodesTotal: null, nodesBanned: undefined, torrents: "nope", cacheTrusted: -5 });
+  ok(empty.nodes.total === 0 && empty.nodes.banned === 0 && empty.corpus.torrents === 0 && empty.cache.cachedTrusted === 0, "NULL/garbage/negative counts coerce to 0 (never null)");
+  ok(!JSON.stringify(s).toLowerCase().includes("pubkey") && !/tt\d/.test(JSON.stringify(s)), "stats carry no node ids / imdb titles / facts - aggregate counts only");
 }
 
 // --- report-driven penalty threshold (anti-poisoning) ---

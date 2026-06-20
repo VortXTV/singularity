@@ -37,6 +37,7 @@ import {
   ingestSyncDelta,
   type IngestedFacts,
   buildLeaderboard,
+  buildStats,
   reportsExceedThreshold,
   reConfirmationVindicates,
   CACHE_TTL_MS,
@@ -730,6 +731,31 @@ async function handlePull(req: Request, env: Env, ip: string): Promise<Response>
   return json({ pulled: true, ...summary });
 }
 
+// Public federation health/transparency snapshot: aggregate COUNTS only (no node id / pubkey / title / fact),
+// so it is safe to serve open + edge-cacheable. The COUNTs are bounded by the corpus size; the response is
+// cacheable (third arg) so repeat hits serve from the edge rather than re-running the aggregates.
+async function handleStats(env: Env, ip: string, now: number): Promise<Response> {
+  // The COUNT(DISTINCT ...) below is the one non-trivial query; the response is edge-cacheable, but a junk
+  // query string can bust that cache, so a per-IP cap blunts single-source re-aggregation abuse.
+  if (env.RL && !(await env.RL.limit({ key: `stats:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const [nodes, titles, torrents, http, nzbs, cache, reports, peers] = await Promise.all([
+    env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN banned = 1 THEN 1 ELSE 0 END) AS banned, SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS active FROM nodes").bind(now - CACHE_TTL_MS).first<{ total: number; banned: number; active: number }>(), // active = seen within the 7-day TTL window
+    env.DB.prepare("SELECT COUNT(DISTINCT CASE WHEN instr(meta_id, ':') > 0 THEN substr(meta_id, 1, instr(meta_id, ':') - 1) ELSE meta_id END) AS n FROM torrents").first<{ n: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM torrents").first<{ n: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM http_streams").first<{ n: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM nzbs").first<{ n: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n, SUM(CASE WHEN cached = 1 AND confirmations >= ? THEN 1 ELSE 0 END) AS trusted FROM cache_facts").bind(MIN_CONFIRMATIONS).first<{ n: number; trusted: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM reports").first<{ n: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM peers").first<{ n: number }>(),
+  ]);
+  const stats = buildStats({
+    nodesTotal: nodes?.total, nodesActive: nodes?.active, nodesBanned: nodes?.banned,
+    titles: titles?.n, torrents: torrents?.n, httpStreams: http?.n, nzbs: nzbs?.n,
+    cacheFacts: cache?.n, cacheTrusted: cache?.trusted, reports: reports?.n, peers: peers?.n,
+  });
+  return json({ service: "singularity", stats, generatedAt: now }, 200, true);
+}
+
 // Public trust leaderboard (gamify hosting). Top non-barred nodes by contributions; facts only.
 async function handleLeaderboard(env: Env, url: URL): Promise<Response> {
   const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? "25") || 25));
@@ -786,6 +812,7 @@ export default {
 
     if (req.method === "GET" && path === "/hive/sync") return handleSync(env, url, ip);
     if (req.method === "GET" && path === "/hive/leaderboard") return handleLeaderboard(env, url);
+    if (req.method === "GET" && path === "/hive/stats") return handleStats(env, ip, Date.now());
     if (req.method === "POST" && path === "/hive/contribute") return handleContribute(req, env, ip);
     if (req.method === "POST" && path === "/hive/telemetry") return handleTelemetry(req, env, ip);
     if (req.method === "POST" && path === "/hive/report") return handleReport(req, env, ip);

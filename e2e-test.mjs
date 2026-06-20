@@ -213,6 +213,16 @@ console.log("federation delta-sync");
   ok(!blob.includes("node_id") && !blob.includes("pubkey") && !blob.includes("token"), "sync delta carries facts only (no node ids / pubkeys / tokens)");
 }
 
+console.log("public stats snapshot");
+{
+  const r = await get("/hive/stats");
+  ok(r.status === 200 && r.json?.service === "singularity" && r.json?.stats, "GET /hive/stats returns a stats snapshot");
+  const s = r.json?.stats || {};
+  ok(s.nodes && s.corpus && s.cache && typeof s.peers === "number", "stats has nodes/corpus/cache/peers shape");
+  ok(typeof s.corpus.titles === "number" && typeof s.corpus.torrents === "number", "corpus counts are numbers (never null)");
+  ok(!/tt\d/.test(JSON.stringify(r.json)) && !JSON.stringify(r.json).toLowerCase().includes("pubkey"), "stats leak no imdb titles / node pubkeys (aggregate counts only)");
+}
+
 console.log("leaderboard + telemetry");
 {
   const lb = await get("/hive/leaderboard");
