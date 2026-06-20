@@ -1,0 +1,18 @@
+{
+  "name": "singularity",
+  "private": true,
+  "type": "module",
+  "description": "Singularity: the VortX source engine - a crowd-verified source corpus + a configurable super add-on (debrid, Usenet, your add-ons, smart filtering, recommendations, poster ratings). Dormant groundwork, ships with VortX 0.4.0+.",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VortXTV/singularity"
+  },
+  "homepage": "https://singularity.vortx.tv",
+  "scripts": {
+    "test": "node --experimental-strip-types test/singularity.test.ts && node --experimental-strip-types test/config.test.ts",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "e2e": "node e2e-test.mjs"
+  }
+}

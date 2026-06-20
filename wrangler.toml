@@ -1,0 +1,35 @@
+# Singularity: the VortX source engine (PUBLIC plane of the federation), served at singularity.vortx.tv.
+#
+# A SEPARATE Worker from vortx-sync (../wrangler.toml). vortx-sync is a blind E2E relay with
+# locked-origin CORS at api.vortx.tv; Singularity serves public Stremio add-on JSON with open CORS and
+# holds NO user data - only source facts (infohash index + debrid-cache booleans + live health). Keeping
+# them as two Workers + two D1 databases is the "two planes" separation from the federation spec.
+#
+# STATUS: dormant groundwork (0.4.0+). Not deployed and not pointed at by the app yet. Deploy steps:
+#   1. npx wrangler d1 create vortx-singularity        # paste database_id below
+#   2. npx wrangler d1 execute vortx-singularity --remote --file=./schema.sql
+#   3. npx wrangler deploy
+#   4. Map singularity.vortx.tv to this Worker (dashboard > Workers > Triggers > Custom Domains).
+
+name = "vortx-singularity"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+
+# singularity.vortx.tv (vortx.tv is on this Cloudflare account, so wrangler provisions DNS + cert).
+routes = [{ pattern = "singularity.vortx.tv", custom_domain = true }]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vortx-singularity"
+database_id = "PLACEHOLDER_RUN_wrangler_d1_create_vortx-singularity"
+
+[observability]
+enabled = true
+
+# Per-IP throttle on the WRITE path (contribution / report spam control). Reads (manifest/stream) are
+# unthrottled - they are public, cacheable add-on responses. period must be 10 or 60.
+[[unsafe.bindings]]
+name = "RL"
+type = "ratelimit"
+namespace_id = "2001"
+simple = { limit = 60, period = 60 }

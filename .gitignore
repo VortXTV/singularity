@@ -1,0 +1,14 @@
+# deps & build
+node_modules/
+dist/
+.wrangler/
+
+# wrangler / cloudflare local state & secrets
+.dev.vars
+*.env
+.env*
+worker-configuration.d.ts
+
+# os / editor
+.DS_Store
+*.log
