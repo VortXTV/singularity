@@ -788,6 +788,7 @@ const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v)
 export const CACHEFACT_PREFIX = "vortx-cachefact-v1\n"; // domain-separation prefix (crates/hive hive_constants)
 // Debrid service wire strings, identical to the engine's DebridService enum (fact.rs). dmm_public is advisory.
 export const HIVE_DEBRID_SERVICES = ["realdebrid", "alldebrid", "premiumize", "torbox", "debridlink", "easydebrid", "dmm_public"];
+const KNOWN_HIVE_SERVICES = new Set(HIVE_DEBRID_SERVICES);
 
 export interface CacheFactInput {
   infohash: string;
@@ -891,18 +892,36 @@ export function assembleSyncDelta(
   return { since, cursor, torrents, cache, health, http, nzb };
 }
 
+// A candidate signed CacheFact relayed by a peer: field-shaped here, but the SIGNATURE is verified (and the
+// engine bounds re-checked) in the writer (recordSignedCacheFact). Safe to gossip because it self-verifies
+// against its ORIGINAL signer (the peer is only a relay and cannot forge it).
+export interface CacheFactCandidate {
+  infohash: string;
+  service: string;
+  cached: boolean;
+  fileIdx: number;
+  size: number | null;
+  quality: string | null;
+  verifiedAt: number;
+  ttl: number;
+  signerPubkey: string;
+  sig: string;
+}
+
 export interface IngestedFacts {
   torrents: CleanFact[]; // index facts (infohash<->title) + metadata; trust fields (cached/seeders) ignored on write
   torrentMeta: string[]; // the canonical metaId for each torrents[i] (parallel array; season-pack aware)
   nzbs: CleanNzbFact[];
   nzbMeta: string[]; // canonical metaId for each nzbs[i]
   health: Array<{ infoHash: string; seeders: number }>;
+  cacheFacts: CacheFactCandidate[]; // SIGNED cache facts (self-verifying); the writer verifies each sig
 }
 
 // Per-array caps bound a single peer delta's DB-write cost (worst case = the sum, not 3x one number).
 const MAX_INGEST_TORRENTS = 800;
 const MAX_INGEST_NZB = 400;
 const MAX_INGEST_HEALTH = 800;
+const MAX_INGEST_CACHE = 800; // each costs one WebCrypto verify in the writer, so keep it bounded
 
 /**
  * The INBOUND federation boundary (node-to-node gossip): reduce an untrusted PEER sync delta to ONLY the
@@ -942,7 +961,34 @@ export function ingestSyncDelta(delta: unknown): IngestedFacts {
     const seeders = asInt(r.seeders);
     if (hash && seeders != null) health.push({ infoHash: hash, seeders });
   }
-  return { torrents, torrentMeta, nzbs, nzbMeta, health };
+  // SIGNED cache facts: shape the engine-native CacheFacts a peer relayed. Light field validation only - the
+  // writer (recordSignedCacheFact) is authoritative: it verifies each fact's signature against its own
+  // signer_pubkey and re-applies the ttl cap / skew bound. A relayed fact self-verifies, so the peer cannot
+  // forge it; "facts never trust" becomes "trust only what's validly signed".
+  const cacheFacts: CacheFactCandidate[] = [];
+  for (const r of arr(d.cache, MAX_INGEST_CACHE)) {
+    const infohash = typeof r.infohash === "string" ? r.infohash.toLowerCase() : "";
+    const service = typeof r.service === "string" ? r.service.toLowerCase() : "";
+    const signerPubkey = typeof r.signer_pubkey === "string" ? r.signer_pubkey : "";
+    const sig = typeof r.sig === "string" ? r.sig : "";
+    const verifiedAt = asInt(r.verified_at);
+    const ttl = asInt(r.ttl);
+    if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(infohash) || !KNOWN_HIVE_SERVICES.has(service)) continue;
+    if (!signerPubkey || !sig || verifiedAt == null || ttl == null) continue;
+    cacheFacts.push({
+      infohash,
+      service,
+      cached: r.cached === true,
+      fileIdx: asInt(r.file_idx) ?? -1,
+      size: asInt(r.size),
+      quality: typeof r.quality === "string" ? r.quality : null,
+      verifiedAt,
+      ttl,
+      signerPubkey,
+      sig,
+    });
+  }
+  return { torrents, torrentMeta, nzbs, nzbMeta, health, cacheFacts };
 }
 
 // The visible trust leaderboard (gamify hosting - a locked federation decision). Shapes node rows into

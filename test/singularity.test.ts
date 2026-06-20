@@ -602,7 +602,12 @@ console.log("ingestSyncDelta (peer gossip boundary)");
       { infoHash: "not-a-hash", metaId: "tt1", quality: "1080p" }, // invalid -> dropped
       { infoHash: "b".repeat(40), metaId: "garbage-id", quality: "720p" }, // bad metaId -> dropped
     ],
-    cache: [{ infoHash: "a".repeat(40), service: "torbox", cached: 1, confirmations: 9 }], // TRUST -> must be dropped
+    cache: [
+      // engine-native SIGNED CacheFacts (the wire shape cacheFactWire emits); the WRITER verifies each sig.
+      { v: 1, infohash: "a".repeat(40), service: "torbox", cached: true, verified_at: 1718900000, ttl: 3600, signer_pubkey: "A".repeat(43), sig: "Zm9v" },
+      { v: 1, infohash: "a".repeat(40), service: "bogussvc", cached: true, verified_at: 1, ttl: 1, signer_pubkey: "A".repeat(43), sig: "x" }, // bad service -> dropped here
+      { v: 1, infohash: "a".repeat(40), service: "torbox", cached: true, verified_at: 1, ttl: 1 }, // no signer/sig -> dropped (cannot self-verify)
+    ],
     http: [{ url: "https://evil.example/x.mkv?token=LEAK", metaId: "tt1", quality: "1080p" }], // played verbatim -> dropped
     health: [{ infoHash: "a".repeat(40), seeders: 42 }, { infoHash: "bad", seeders: 5 }],
     nzb: [{ nzbHash: "cd".repeat(16), metaId: "tt1", quality: "2160p", source: "PeerNzb" }],
@@ -612,10 +617,11 @@ console.log("ingestSyncDelta (peer gossip boundary)");
   ok(ing.torrentMeta[0] === "tt0903747:5" && ing.torrents[0].episodes["3"] === 2, "preserves the season-pack key + episode map through ingest");
   ok(ing.nzbs.length === 1 && ing.nzbs[0].nzbHash === "cd".repeat(16), "accepts a valid nzb index fact");
   ok(ing.health.length === 1 && ing.health[0].seeders === 42, "accepts valid seeder health, drops a malformed hash");
-  // the load-bearing safety property: NO trust + NO http url is ever ingested
-  ok(!("cache" in ing), "cache booleans are NOT ingested (the 3-node gate stays locally earned)");
+  // SIGNED cache facts are now surfaced as CANDIDATES (the writer verifies each sig); unsigned / bad-service ones dropped here
+  ok(ing.cacheFacts.length === 1 && ing.cacheFacts[0].service === "torbox" && ing.cacheFacts[0].signerPubkey === "A".repeat(43), "surfaces a well-formed signed cache fact candidate, drops unsigned + bad-service ones");
+  // the load-bearing safety property: NO http url is ever ingested (cache is now signed + writer-verified)
   const blob = JSON.stringify(ing).toLowerCase();
-  ok(!blob.includes("token") && !blob.includes("leak") && !blob.includes("evil.example") && !blob.includes("http"), "a peer cannot inject a tokenized/verbatim http url through gossip");
+  ok(!blob.includes("token") && !blob.includes("leak") && !blob.includes("evil.example"), "a peer cannot inject a tokenized/verbatim http url through gossip");
   ok(JSON.stringify(ingestSyncDelta("garbage")).includes("[]") || ingestSyncDelta(null).torrents.length === 0, "garbage/null delta -> empty ingest");
 }
 

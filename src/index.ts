@@ -699,9 +699,10 @@ async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
 // NOT call recordTorrentConfirmation (a peer is not a local signed node), so `sources` stays at the column
 // default for new rows - a peer's word never inflates the anti-fake-infohash count. Cache/http are never
 // written here (ingestSyncDelta already dropped them): cache trust + the http gate stay locally earned.
-// NOTE: the CleanFact/CleanNzbFact objects still carry `cached`/`service` fields (from the shared sanitizer),
-// but they are deliberately NOT read below - never wire them into recordCache or a cache_facts write.
-async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promise<{ torrents: number; nzbs: number; health: number }> {
+// NOTE: the torrent/nzb INDEX facts carry no node attribution; their unsigned `cached`/`service` fields are
+// deliberately NOT used as trust. The ONLY cache trust ingested from a peer is the SIGNED CacheFacts below,
+// each re-verified by recordSignedCacheFact - a peer relays attestations, it cannot mint them.
+async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promise<{ torrents: number; nzbs: number; health: number; cacheFacts: number }> {
   for (let i = 0; i < ing.torrents.length; i++) {
     const c = ing.torrents[i];
     await env.DB.prepare(
@@ -730,13 +731,21 @@ async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promi
       .bind(h.infoHash, h.seeders, now)
       .run();
   }
-  return { torrents: ing.torrents.length, nzbs: ing.nzbs.length, health: ing.health.length };
+  // SIGNED cache facts: safe to ingest from a peer because each self-verifies against its ORIGINAL signer.
+  // recordSignedCacheFact re-verifies the sig + re-applies the ttl cap / skew bound, so a relaying peer can
+  // neither forge a fact nor replay a stale/never-expiring one. signer = the fact's own signer_pubkey.
+  let cacheStored = 0;
+  for (const c of ing.cacheFacts) {
+    const ok = await recordSignedCacheFact(env, { infohash: c.infohash, service: c.service, cached: c.cached, fileIdx: c.fileIdx, size: c.size, quality: c.quality, verifiedAt: c.verifiedAt, ttl: c.ttl }, c.signerPubkey, c.sig, now);
+    if (ok) cacheStored++;
+  }
+  return { torrents: ing.torrents.length, nzbs: ing.nzbs.length, health: ing.health.length, cacheFacts: cacheStored };
 }
 
 // Pull deltas from every ALLOWLISTED peer (env.PEERS, operator-set https URLs - never user input, so no
 // SSRF) and ingest INDEX + health facts. Per-peer cursor in `peers`. A peer being down or returning garbage
 // must never break the sweep, so each peer is isolated in try/catch.
-async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; torrents: number; nzbs: number; health: number }> {
+async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; torrents: number; nzbs: number; health: number; cacheFacts: number }> {
   // Operator allowlist only. Reject anything that isn't a clean https URL with NO userinfo (a credential in
   // env.PEERS would leak into the fetch / logs), parsed via URL() rather than a loose regex.
   const peers = (env.PEERS ?? "")
@@ -751,7 +760,7 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
       }
     })
     .slice(0, 25);
-  const totals = { peers: 0, torrents: 0, nzbs: 0, health: 0 };
+  const totals = { peers: 0, torrents: 0, nzbs: 0, health: 0, cacheFacts: 0 };
   for (const peer of peers) {
     try {
       const row = await env.DB.prepare("SELECT cursor FROM peers WHERE url = ?").bind(peer).first<{ cursor: number }>();
@@ -786,6 +795,7 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
       totals.torrents += got.torrents;
       totals.nzbs += got.nzbs;
       totals.health += got.health;
+      totals.cacheFacts += got.cacheFacts;
     } catch {
       // a peer being unreachable / malformed must not abort the whole sweep
     }
