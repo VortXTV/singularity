@@ -63,7 +63,8 @@ URL path (`/:config/...`). It exposes the full feature surface:
   HDR-only, exclude-CAM, exclude regex, per-tag include/exclude, **audio-language include/exclude**,
   **source-type include/exclude** (torrent / direct / usenet), **min source nodes**), **Sort** keys (incl. a
   **`preferred` soft-ranking key** that floats your preferred resolutions / languages / tags to the top
-  without excluding anything else), **Format** (presets or a **custom `{variable}` template**), **Proxy** toggle.
+  without excluding anything else, plus an optional **per-content-type `sortSeries` override**), **Format**
+  (presets or a **custom `{variable}` template**), **Proxy** toggle.
 - **Ratings on posters** - bake IMDb / Rotten Tomatoes / TMDB ratings + quality badges onto poster art
   (adds the `meta` resource).
 - **Recommendations** - personalized "Top Picks for You" / "Because You Watched" catalogs from your taste

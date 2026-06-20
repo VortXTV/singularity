@@ -41,6 +41,7 @@ const checks = (group: string, items: string[], on: string[] = []) =>
 const resChips = RESOLUTIONS.map((r) => `<label class="chip"><input type="checkbox" data-group="resolutions" value="${r}"><span>${r}</span></label>`).join("");
 const resChipsFor = (group: string) => RESOLUTIONS.map((r) => `<label class="chip"><input type="checkbox" data-group="${group}" value="${r}"><span>${r}</span></label>`).join("");
 const sortRows = SORT_KEYS.map((k) => `<label class="chk"><input type="checkbox" data-group="sort" value="${k}"${DEFAULT_CONFIG.sort.includes(k) ? " checked" : ""}><span>${k}</span></label>`).join("");
+const sortSeriesRows = SORT_KEYS.map((k) => `<label class="chk"><input type="checkbox" data-group="sortSeries" value="${k}"><span>${k}</span></label>`).join("");
 const formatOpts = FORMAT_PRESETS.map((f) => `<option value="${f}"${f === DEFAULT_CONFIG.format ? " selected" : ""}>${label(f)}</option>`).join("");
 const historyOpts = HISTORY_SOURCES.map((h) => `<option value="${h}">${label(h)}</option>`).join("");
 
@@ -165,6 +166,7 @@ export function renderConfigurePage(baseUrl: string): string {
 <section class="card"><h2>Sort &amp; format</h2>
   <p class="hint">Rank order (strongest first) and how each result reads.</p>
   <div class="field"><span class="lbl">Sort keys</span><div class="grid">${sortRows}</div></div>
+  <div class="field" style="margin-top:14px"><span class="lbl">Series sort override (leave empty to reuse the sort above)</span><div class="grid">${sortSeriesRows}</div></div>
   <div class="row" style="margin-top:14px">
     <div class="field"><label class="lbl" for="format">Result format</label><select id="format">${formatOpts}</select></div>
     <div class="field"><label class="toggle" style="margin-top:24px"><input id="proxyEnabled" type="checkbox"> Route streams through a proxy</label></div>
@@ -230,7 +232,7 @@ export function renderConfigurePage(baseUrl: string): string {
         maxPerResolution: Math.min(50, Math.max(0, parseInt(document.getElementById('maxPerResolution').value||'0',10)||0)),
         dedup: document.getElementById('dedup').checked,
       },
-      sort: vals('sort'),
+      sort: vals('sort'), sortSeries: vals('sortSeries'),
       format: document.getElementById('format').value,
       formatTemplate: document.getElementById('formatTemplate').value.slice(0,240),
       proxyEnabled: document.getElementById('proxyEnabled').checked,

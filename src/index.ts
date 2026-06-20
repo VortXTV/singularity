@@ -269,7 +269,9 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         maxResults: config.filters.maxResults,
         maxPerResolution: config.filters.maxPerResolution,
         dedup: config.filters.dedup,
-        sort: config.sort,
+        // Content-aware sort: a series request uses sortSeries when set, else the default sort (movies always
+        // use the default). The request `type` is the only thing that differs, so the rest of opts is shared.
+        sort: type === "series" && config.sortSeries.length > 0 ? config.sortSeries : config.sort,
         format: config.format,
         formatTemplate: config.formatTemplate,
       }

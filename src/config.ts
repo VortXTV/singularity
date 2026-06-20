@@ -57,7 +57,8 @@ export interface SingularityConfig {
   usenetServices: string[];
   addons: string[]; // your own add-on manifest URLs to aggregate (you bring them; nothing named here)
   filters: SingularityFilters;
-  sort: string[]; // ordered sort keys, strongest first
+  sort: string[]; // ordered sort keys, strongest first (the default / used for movies)
+  sortSeries: string[]; // optional per-content-type override: used for series when non-empty (else `sort`)
   format: string; // result-line format preset id
   formatTemplate: string; // when format === "custom": a {variable} template for the stream line
   proxyEnabled: boolean; // route streams through a proxy (endpoint/creds are app-side)
@@ -71,6 +72,7 @@ export const DEFAULT_CONFIG: SingularityConfig = {
   addons: [],
   filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], includeLanguages: [], excludeLanguages: [], minSourceNodes: 1, includeKinds: [], excludeKinds: [], preferredResolutions: [], preferredLanguages: [], preferredTags: [], maxResults: 0, maxPerResolution: 0, dedup: false },
   sort: ["cached", "resolution", "seeders"],
+  sortSeries: [],
   format: "standard",
   formatTemplate: "",
   proxyEnabled: false,
@@ -137,6 +139,7 @@ export function validateConfig(raw: unknown): SingularityConfig {
       dedup: bool(f.dedup, false),
     },
     sort: pickKnown(r.sort, SORT_KEYS),
+    sortSeries: pickKnown(r.sortSeries, SORT_KEYS),
     format,
     formatTemplate: str(r.formatTemplate, MAX_FORMAT_TEMPLATE),
     proxyEnabled: bool(r.proxyEnabled, false),

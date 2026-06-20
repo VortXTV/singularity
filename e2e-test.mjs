@@ -195,6 +195,11 @@ console.log("season packs: a tt:S torrent surfaces for an episode tt:S:E");
   // a season pack must NOT leak into a DIFFERENT season's episode
   const otherSeason = (await get(`/stream/series/${SHOW}:4:3.json`)).json?.streams || [];
   ok(!otherSeason.some((s) => s.infoHash === PACK), "the S5 pack does NOT surface for an S4 episode");
+  // content-aware sort: a series request honors sortSeries (well-formed; the S5 pack still surfaces)
+  const b64u = (x) => Buffer.from(x, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const csCfg = b64u(JSON.stringify({ sort: ["cached", "resolution"], sortSeries: ["seeders", "size"] }));
+  const cs = (await get(`/${csCfg}/stream/series/${EP}.json`)).json?.streams || [];
+  ok(cs.some((s) => s.infoHash === PACK), "a series-specific sort (sortSeries) still returns the season pack, well-formed");
 }
 
 console.log("gossip: /hive/pull is disabled unless PULL_SECRET is configured");

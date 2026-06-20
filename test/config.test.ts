@@ -57,6 +57,7 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
     addons: ["https://ok.example/manifest.json", "ftp://bad", "not a url"],
     filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"], includeLanguages: ["EN", "klingon", "ja"], excludeLanguages: ["es", "bogus"], minSourceNodes: 99, includeKinds: ["torrent", "bogus"], excludeKinds: ["nzb", "dvd"], preferredResolutions: ["1080p", "haxx"], preferredLanguages: ["JA", "nope"], preferredTags: ["hdr10plus", "junk"], maxResults: 9999, maxPerResolution: 999 },
     sort: ["cached", "seeders", "boguskey"],
+    sortSeries: ["seeders", "size", "nope"],
     format: "custom",
     formatTemplate: "{quality} ".repeat(40), // 400 chars -> capped to 240
     recommendations: { enabled: true, historySource: "myspace" }, // invalid source -> default
@@ -84,6 +85,7 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
   ok(v.format === "custom" && v.formatTemplate.length === 240, "keeps a custom format + caps the template length");
   ok(v.filters.maxResults === 200 && v.filters.maxPerResolution === 50, "clamps result limits to their caps");
   ok(!v.sort.includes("boguskey"), "drops unknown sort key");
+  ok(v.sortSeries.includes("seeders") && v.sortSeries.includes("size") && !v.sortSeries.includes("nope"), "keeps known series-sort override keys, drops unknown");
   ok(["library", "trakt", "simkl"].includes(v.recommendations.historySource), "normalizes recommendations history source");
   const blob = JSON.stringify(v).toLowerCase();
   ok(!blob.includes("leak") && !("debridKeys" in (v as object)) && !("apiKey" in (v as object)) && !("token" in (v as object)), "NO secret/key fields survive validation");
