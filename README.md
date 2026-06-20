@@ -58,8 +58,8 @@ URL path (`/:config/...`). It exposes the full feature surface:
   secret-looking.
 - **Your add-ons** to aggregate (bring any manifest URLs), **Filters** (resolutions, min-seeders, max-size,
   HDR-only, exclude-CAM, exclude regex, per-tag include/exclude, **audio-language include/exclude**,
-  **min source nodes**), **Sort** keys, **Format** (presets or a **custom `{variable}` template** for the
-  stream line), **Proxy** toggle.
+  **source-type include/exclude** (torrent / direct / usenet), **min source nodes**), **Sort** keys,
+  **Format** (presets or a **custom `{variable}` template** for the stream line), **Proxy** toggle.
 - **Ratings on posters** - bake IMDb / Rotten Tomatoes / TMDB ratings + quality badges onto poster art
   (adds the `meta` resource).
 - **Recommendations** - personalized "Top Picks for You" / "Because You Watched" catalogs from your taste
@@ -142,3 +142,7 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
   gated opt-in by `minSourceNodes`; automatic cam detection from non-tag signals is the remaining piece).
 - Node management surfaces (the dashboard "Nodes" section + each node's localhost UI).
 - Contribution-gated reads.
+- A user-defined conditional rule language (e.g. "drop 720p only if >5 1080p exist") is a deliberate
+  **non-goal**: evaluating user-supplied expressions in a public Worker is an injection / maintenance
+  liability. The same intent is served by explicit, safe options (resolution allowlist, per-tag and
+  source-type include/exclude, result limits, sort order).

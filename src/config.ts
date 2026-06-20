@@ -10,7 +10,7 @@
  * Config travels in the add-on URL path: GET /:config/manifest.json, /:config/stream/..., /:config/
  * catalog/... where :config = base64url(JSON(SingularityConfig)).
  */
-import { buildManifest, KNOWN_TAGS_LIST, KNOWN_LANGUAGES_LIST, TRENDING_CATALOGS, type Manifest } from "./corpus.ts";
+import { buildManifest, KNOWN_TAGS_LIST, KNOWN_LANGUAGES_LIST, SOURCE_KINDS, TRENDING_CATALOGS, type Manifest } from "./corpus.ts";
 
 // Debrid services the user can plug their own account into (keys live in the VortX account, never here).
 export const DEBRID_SERVICES = [
@@ -43,6 +43,8 @@ export interface SingularityFilters {
   includeLanguages: string[]; // keep only sources in at least one of these audio languages (lenient on unknowns)
   excludeLanguages: string[]; // drop sources in any of these audio languages
   minSourceNodes: number; // require this many distinct nodes per torrent (anti-fake-infohash; 1 = off)
+  includeKinds: string[]; // keep only these source kinds (torrent/http/nzb); empty = all
+  excludeKinds: string[]; // drop these source kinds
   maxResults: number; // cap total results (0 = unlimited)
   maxPerResolution: number; // cap results per resolution (0 = unlimited)
   dedup: boolean; // collapse same-release torrents/nzb (http fallbacks never collapsed)
@@ -64,7 +66,7 @@ export const DEFAULT_CONFIG: SingularityConfig = {
   debridServices: [],
   usenetServices: [],
   addons: [],
-  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], includeLanguages: [], excludeLanguages: [], minSourceNodes: 1, maxResults: 0, maxPerResolution: 0, dedup: false },
+  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], includeLanguages: [], excludeLanguages: [], minSourceNodes: 1, includeKinds: [], excludeKinds: [], maxResults: 0, maxPerResolution: 0, dedup: false },
   sort: ["cached", "resolution", "seeders"],
   format: "standard",
   formatTemplate: "",
@@ -122,6 +124,8 @@ export function validateConfig(raw: unknown): SingularityConfig {
       includeLanguages: pickKnown(f.includeLanguages, KNOWN_LANGUAGES_LIST),
       excludeLanguages: pickKnown(f.excludeLanguages, KNOWN_LANGUAGES_LIST),
       minSourceNodes: clamp(f.minSourceNodes, 1, 10, 1),
+      includeKinds: pickKnown(f.includeKinds, SOURCE_KINDS),
+      excludeKinds: pickKnown(f.excludeKinds, SOURCE_KINDS),
       maxResults: clamp(f.maxResults, 0, 200, 0),
       maxPerResolution: clamp(f.maxPerResolution, 0, 50, 0),
       dedup: bool(f.dedup, false),

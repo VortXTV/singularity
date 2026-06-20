@@ -144,6 +144,11 @@ console.log("HTTP (3-node gated) + NZB sources");
   ok(!!httpS && !httpS.infoHash, "after 3 distinct nodes, HTTP url surfaces (public url, no infoHash)");
   const blob = JSON.stringify(s.json).toLowerCase();
   ok(!blob.includes("token") && !blob.includes("secret"), "no token/secret in the mixed-kind response");
+  // source-type filter: a config that excludes nzb hides the NZB source for a non-usenet user
+  const b64u = (x) => Buffer.from(x, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const noNzb = b64u(JSON.stringify({ filters: { excludeKinds: ["nzb"] } }));
+  const filtered = (await get(`/${noNzb}/stream/movie/${META2}.json`)).json?.streams || [];
+  ok(!filtered.some((x) => /NZB/i.test(x.title)), "excludeKinds=[nzb] hides the NZB source; other kinds remain");
 }
 
 console.log("anti-fake-infohash: minSourceNodes gates single-node associations");

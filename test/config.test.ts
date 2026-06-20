@@ -55,7 +55,7 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
     debridServices: ["torbox", "EVIL!", "realdebrid", "torbox"], // unknown dropped, dupes collapsed, lowercased
     usenetServices: ["easynews", "nope"],
     addons: ["https://ok.example/manifest.json", "ftp://bad", "not a url"],
-    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"], includeLanguages: ["EN", "klingon", "ja"], excludeLanguages: ["es", "bogus"], minSourceNodes: 99, maxResults: 9999, maxPerResolution: 999 },
+    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"], includeLanguages: ["EN", "klingon", "ja"], excludeLanguages: ["es", "bogus"], minSourceNodes: 99, includeKinds: ["torrent", "bogus"], excludeKinds: ["nzb", "dvd"], maxResults: 9999, maxPerResolution: 999 },
     sort: ["cached", "seeders", "boguskey"],
     format: "custom",
     formatTemplate: "{quality} ".repeat(40), // 400 chars -> capped to 240
@@ -76,6 +76,8 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
   ok(v.filters.includeLanguages.includes("en") && v.filters.includeLanguages.includes("ja") && !v.filters.includeLanguages.includes("klingon"), "keeps known include languages (lowercased), drops unknown");
   ok(v.filters.excludeLanguages.includes("es") && !v.filters.excludeLanguages.includes("bogus"), "keeps known exclude languages, drops unknown");
   ok(v.filters.minSourceNodes === 10, "clamps minSourceNodes to the 1..10 range");
+  ok(v.filters.includeKinds.includes("torrent") && !v.filters.includeKinds.includes("bogus"), "keeps known source kinds, drops unknown");
+  ok(v.filters.excludeKinds.includes("nzb") && !v.filters.excludeKinds.includes("dvd"), "keeps known exclude kinds, drops unknown");
   ok(v.format === "custom" && v.formatTemplate.length === 240, "keeps a custom format + caps the template length");
   ok(v.filters.maxResults === 200 && v.filters.maxPerResolution === 50, "clamps result limits to their caps");
   ok(!v.sort.includes("boguskey"), "drops unknown sort key");

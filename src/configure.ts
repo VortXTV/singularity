@@ -8,7 +8,7 @@ import {
   DEBRID_SERVICES, USENET_SERVICES, RESOLUTIONS, SORT_KEYS,
   FORMAT_PRESETS, HISTORY_SOURCES, DEFAULT_CONFIG,
 } from "./config.ts";
-import { FORMAT_TEMPLATE_VARS } from "./corpus.ts";
+import { FORMAT_TEMPLATE_VARS, SOURCE_KINDS } from "./corpus.ts";
 
 // Curated user-facing tag choices (visual / audio / encode; CAM/junk is handled by the Exclude-CAM toggle).
 const TAG_CHOICES = ["hdr", "dv", "hdr10plus", "hlg", "10bit", "imax", "remux", "atmos", "truehd", "dtshd", "dts", "ddp", "flac", "av1", "hevc", "avc", "xvid"];
@@ -24,6 +24,10 @@ const LANG_CHOICES: Array<[string, string]> = [
 ];
 const langChips = (group: string) =>
   LANG_CHOICES.map(([s, d]) => `<label class="chip"><input type="checkbox" data-group="${group}" value="${s}"><span>${d}</span></label>`).join("");
+
+const KIND_LABELS: Record<string, string> = { torrent: "Torrent", http: "Direct (HTTP)", nzb: "Usenet (NZB)" };
+const kindChips = (group: string) =>
+  SOURCE_KINDS.map((k) => `<label class="chip"><input type="checkbox" data-group="${group}" value="${k}"><span>${KIND_LABELS[k] || k}</span></label>`).join("");
 
 const LABELS: Record<string, string> = {
   realdebrid: "Real-Debrid", alldebrid: "AllDebrid", premiumize: "Premiumize", debridlink: "Debrid-Link",
@@ -151,6 +155,12 @@ export function renderConfigurePage(baseUrl: string): string {
   <div class="field" style="margin-top:14px"><span class="lbl">Exclude</span><div class="chips">${langChips("excludeLanguages")}</div></div>
 </section>
 
+<section class="card"><h2>Source types</h2>
+  <p class="hint">Which kinds of source to show. Leave Include empty for all; e.g. exclude Usenet if you have no provider.</p>
+  <div class="field"><span class="lbl">Include (any of)</span><div class="chips">${kindChips("includeKinds")}</div></div>
+  <div class="field" style="margin-top:14px"><span class="lbl">Exclude</span><div class="chips">${kindChips("excludeKinds")}</div></div>
+</section>
+
 <section class="card"><h2>Sort &amp; format</h2>
   <p class="hint">Rank order (strongest first) and how each result reads.</p>
   <div class="field"><span class="lbl">Sort keys</span><div class="grid">${sortRows}</div></div>
@@ -206,6 +216,7 @@ export function renderConfigurePage(baseUrl: string): string {
         includeTags: vals('includeTags'), excludeTags: vals('excludeTags'),
         includeLanguages: vals('includeLanguages'), excludeLanguages: vals('excludeLanguages'),
         minSourceNodes: Math.min(10, Math.max(1, parseInt(document.getElementById('minSourceNodes').value||'1',10)||1)),
+        includeKinds: vals('includeKinds'), excludeKinds: vals('excludeKinds'),
         maxResults: Math.min(200, Math.max(0, parseInt(document.getElementById('maxResults').value||'0',10)||0)),
         maxPerResolution: Math.min(50, Math.max(0, parseInt(document.getElementById('maxPerResolution').value||'0',10)||0)),
         dedup: document.getElementById('dedup').checked,

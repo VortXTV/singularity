@@ -250,6 +250,8 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         includeLanguages: config.filters.includeLanguages,
         excludeLanguages: config.filters.excludeLanguages,
         minSourceNodes: config.filters.minSourceNodes,
+        includeKinds: config.filters.includeKinds,
+        excludeKinds: config.filters.excludeKinds,
         maxResults: config.filters.maxResults,
         maxPerResolution: config.filters.maxPerResolution,
         dedup: config.filters.dedup,

@@ -404,6 +404,22 @@ console.log("minSourceNodes (anti-fake-infohash)");
   ok(r.streams.some((s) => s.url === "https://cdn.example/a.mkv"), "minSourceNodes does not gate http sources (they have their own node gate)");
 }
 
+// --- source-type filters: include/exclude by kind (torrent/http/nzb) ---
+console.log("includeKinds / excludeKinds (source-type filters)");
+{
+  const now = 7_900_000_000_000;
+  const tor = { kind: "torrent", infoHash: "a".repeat(40), quality: "1080p", size: 8e9, source: "x", seeders: 50, cachedOn: [], trusted: true, lastVerified: now - 1000 };
+  const http = { kind: "http", url: "https://cdn.example/a.mkv", quality: "1080p", size: 8e9, source: "x", seeders: null, cachedOn: [], trusted: true, lastVerified: now - 1000 };
+  const nzb = { kind: "nzb", nzbHash: "cd".repeat(16), quality: "1080p", size: 8e9, source: "x", seeders: null, cachedOn: ["torbox"], trusted: true, lastVerified: now - 1000 };
+  const rows = [tor, http, nzb];
+  let r = buildStreamResponse(rows, now, { excludeKinds: ["nzb"] });
+  ok(!r.streams.some((s) => /NZB/i.test(s.title)) && r.streams.some((s) => s.infoHash), "excludeKinds drops nzb, keeps the rest");
+  r = buildStreamResponse(rows, now, { includeKinds: ["torrent"] });
+  ok(r.streams.length === 1 && r.streams[0].infoHash === "a".repeat(40), "includeKinds=torrent keeps only torrents");
+  r = buildStreamResponse(rows, now, {});
+  ok(r.streams.length === 3, "no kind filter -> all three kinds surface");
+}
+
 // --- result limits (cap total + per-resolution, applied after sort so the best survive) ---
 console.log("result limits");
 {
