@@ -18,6 +18,7 @@
 export const MIN_CONFIRMATIONS = 3; // a cache claim is trusted after 3 independent nodes, OR own debrid
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // a cache/health fact is stale after 7 days; recent verifications outrank old ones
 export const PENALTY_BAN_THRESHOLD = 5; // after this many penalties a node is barred from the benefits (invisible to the user)
+export const REPORT_THRESHOLD = 3; // distinct reporters needed to crowd-reject a cache claim (symmetric with the gate)
 
 // The only fields a contribution may carry into the corpus. Anything else (url, magnet, token,
 // apiKey, resolvedUrl, authorization, ...) is dropped by omission: facts in, never tokens out.
@@ -187,6 +188,11 @@ export function isFresh(lastVerified: number, now: number, ttlMs = CACHE_TTL_MS)
 }
 
 /** A node past the penalty threshold (or explicitly banned) is barred from the benefits. */
+/** A cache claim is crowd-rejected once REPORT_THRESHOLD distinct reporters flag it (the counter-signal). */
+export function reportsExceedThreshold(distinctReporters: number, threshold = REPORT_THRESHOLD): boolean {
+  return distinctReporters >= threshold;
+}
+
 export function isNodeBarred(node: { penalties: number; banned?: boolean }): boolean {
   return node.banned === true || node.penalties >= PENALTY_BAN_THRESHOLD;
 }

@@ -29,8 +29,10 @@ import {
   parseMetaId,
   assembleSyncDelta,
   buildLeaderboard,
+  reportsExceedThreshold,
   CACHE_TTL_MS,
   MIN_CONFIRMATIONS,
+  PENALTY_BAN_THRESHOLD,
   type CorpusStream,
 } from "./corpus.ts";
 import { decodeConfig, buildConfiguredManifest, type SingularityConfig } from "./config.ts";
@@ -411,8 +413,25 @@ async function handleReport(req: Request, env: Env, ip: string): Promise<Respons
   await env.DB.prepare("INSERT INTO reports (info_hash, service, reporter, ts) VALUES (?, ?, ?, ?)")
     .bind(infoHash, service, reporter, Date.now())
     .run();
-  // Adjudication (re-verify the claim before penalizing the contributor OR a false reporter) is later
-  // federation work - recording the report is the seam.
+
+  // Crowd adjudication: the Worker can't re-check a debrid itself (no keys), so DISTINCT reporters are the
+  // counter-signal to the distinct confirmers. Once enough independent reporters flag a claim, it is
+  // crowd-rejected: demote the cache fact, penalize every node that confirmed it, ban repeat offenders,
+  // and clear the confirmations so re-trust requires fresh ones.
+  const rc = await env.DB.prepare("SELECT COUNT(DISTINCT reporter) AS n FROM reports WHERE info_hash = ? AND service = ?")
+    .bind(infoHash, service)
+    .first<{ n: number }>();
+  if (reportsExceedThreshold(rc?.n ?? 0)) {
+    await env.DB.prepare("UPDATE cache_facts SET cached = 0, confirmations = 0 WHERE info_hash = ? AND service = ?").bind(infoHash, service).run();
+    await env.DB.prepare(
+      "UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT node_id FROM cache_confirmations WHERE info_hash = ? AND service = ?)",
+    )
+      .bind(infoHash, service)
+      .run();
+    await env.DB.prepare("UPDATE nodes SET banned = 1 WHERE banned = 0 AND penalties >= ?").bind(PENALTY_BAN_THRESHOLD).run();
+    await env.DB.prepare("DELETE FROM cache_confirmations WHERE info_hash = ? AND service = ?").bind(infoHash, service).run();
+  }
+  // Penalties stay invisible to the user; the response never reveals whether one was applied.
   return json({ recorded: true });
 }
 

@@ -23,6 +23,10 @@ async function newNode() {
   const pubRaw = new Uint8Array(await subtle.exportKey("raw", kp.publicKey));
   return { kp, pubKey: b64(pubRaw) };
 }
+async function nodeIdOf(pubKeyB64) {
+  const h = new Uint8Array(await subtle.digest("SHA-256", new Uint8Array(Buffer.from(pubKeyB64, "base64"))));
+  return [...h].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 async function contribute(node, facts) {
   const ts = Date.now();
   const factsJson = JSON.stringify(facts);
@@ -162,6 +166,23 @@ console.log("leaderboard + telemetry");
   const sig = b64(new Uint8Array(await subtle.sign({ name: "Ed25519" }, node.kp.privateKey, te.encode(`${ts}.${version}`))));
   const r = await fetch(BASE + "/hive/telemetry", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pubKey: node.pubKey, ts, sig, version }) });
   ok(r.status === 200, "POST /hive/telemetry accepts a signed version report");
+}
+
+console.log("report -> crowd-rejection (anti-poisoning)");
+{
+  const META3 = "tt0071562"; // The Godfather Part II
+  const HASHR = "1".repeat(40);
+  const n1 = await newNode(), n2 = await newNode(), n3 = await newNode();
+  const fact = [{ metaId: META3, infoHash: HASHR, quality: "1080p", source: "x", service: "realdebrid", cached: true, seeders: 5 }];
+  await contribute(n1, fact); await contribute(n2, fact); await contribute(n3, fact); // 3 nodes -> trusted + cached
+  let row = ((await get(`/stream/movie/${META3}.json`)).json?.streams || []).find((s) => s.infoHash === HASHR);
+  ok(row && /Cached/i.test(row.title), "cache fact trusted + surfaced after 3 confirmations");
+  for (const n of [n1, n2, n3]) {
+    const reporter = await nodeIdOf(n.pubKey);
+    await fetch(BASE + "/hive/report", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ infoHash: HASHR, service: "realdebrid", reporter }) });
+  }
+  row = ((await get(`/stream/movie/${META3}.json`)).json?.streams || []).find((s) => s.infoHash === HASHR);
+  ok(!row || !/Cached/i.test(row.title), "after 3 distinct reports, the cache claim is demoted (no longer shown cached)");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

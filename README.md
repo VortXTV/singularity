@@ -43,7 +43,7 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/hive/sync?since=&limit=` | none | A node pulls corpus facts newer than its cursor (bootstrap + delta-sync; facts only) |
 | GET | `/hive/leaderboard?limit=` | none | Public trust leaderboard (top nodes by contributions; truncated node id, no pubkey) |
 | POST | `/hive/telemetry` | Ed25519 sig | A node self-reports its software version (refreshes status for the dashboard) |
-| POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" report (seam for the penalty system) |
+| POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" - N distinct reports crowd-reject the claim (demote + penalize + ban) |
 | GET | `/health` | none | Service status |
 
 ## Configuration (the super-addon surface)
@@ -117,7 +117,8 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
   node telemetry to the dashboard are the remaining federation pieces).
 - Anti-cam / fake-infohash trust corpus (today any stored torrent from a non-barred node is surfaced;
   only the *cache* trust gate is enforced).
-- Penalty adjudication (re-verify a report before penalizing the contributor or the reporter).
+- False-reporter penalties (the contributor side is live: N distinct reports demote a claim + penalize/ban
+  its confirmers; penalizing a *false* reporter needs a counter-signal and is still to come).
 - Node management surfaces (the dashboard "Nodes" section + each node's localhost UI).
 - Base32 btih normalization on ingest (today only 40-hex infohashes are accepted).
 - Contribution-gated reads + the visible trust leaderboard.
