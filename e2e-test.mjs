@@ -221,7 +221,43 @@ console.log("federation delta-sync");
   ok(s.status === 200 && Array.isArray(s.json?.torrents) && Array.isArray(s.json?.cache), "GET /hive/sync returns fact arrays");
   ok(typeof s.json?.cursor === "number", "sync returns a cursor for the next pull");
   const blob = JSON.stringify(s.json).toLowerCase();
-  ok(!blob.includes("node_id") && !blob.includes("pubkey") && !blob.includes("token"), "sync delta carries facts only (no node ids / pubkeys / tokens)");
+  // facts-never-TOKENS still holds (no debrid token / playable link). The cache channel is engine-native
+  // signed CacheFacts that DO carry signer_pubkey + sig (required public attestation), so we don't ban those;
+  // the index channels (torrents/http/nzb) still carry no node attribution (the internal node_id is dropped).
+  ok(!blob.includes("token") && !blob.includes("magnet:") && !blob.includes("secret"), "sync delta carries no token / magnet / secret");
+  for (const t of s.json?.torrents || []) ok(!("signer_pubkey" in t) && !("node_id" in t), "torrent index facts carry no node attribution");
+}
+
+console.log("signed CacheFact round-trip: contribute -> /hive/sync re-emits an engine-mergeable signed fact");
+{
+  // Sign a native CacheFact the way the engine does: ed25519 over cacheFactSigningString, base64url no-pad.
+  const b64url = (u8) => Buffer.from(u8).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const node = await newNode();
+  const pkUrl = b64url(Buffer.from(node.pubKey, "base64")); // engine-format signer_pubkey (base64url no-pad)
+  const META5 = "tt1375666"; // Inception
+  const IH = "7".repeat(40);
+  const verifiedAt = Math.floor(Date.now() / 1000);
+  const ttl = 21600; // within the engine's 6h PUBLIC_TTL_CAP_SECS
+  const signingStr = `vortx-cachefact-v1\n${IH}|realdebrid|1|-1|||${verifiedAt}|${ttl}|${pkUrl}`;
+  const cacheSig = b64url(new Uint8Array(await subtle.sign({ name: "Ed25519" }, node.kp.privateKey, te.encode(signingStr))));
+  // contribute the fact (envelope batch-signed as usual) WITH the per-fact cacheSig + verifiedAt + ttl
+  const ts = Date.now();
+  const facts = [{ metaId: META5, infoHash: IH, quality: "1080p", source: "x", service: "realdebrid", cached: true, seeders: 5, cacheSig, verifiedAt, ttl }];
+  const factsJson = JSON.stringify(facts);
+  const envSig = b64url(new Uint8Array(await subtle.sign({ name: "Ed25519" }, node.kp.privateKey, te.encode(`${ts}.${factsJson}`))));
+  const r = await fetch(BASE + "/hive/contribute", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pubKey: pkUrl, ts, sig: envSig, facts }) });
+  ok(r.status === 200, "contribution with a signed CacheFact accepted");
+  const sync = await get("/hive/sync?since=0&limit=200");
+  const cf = (sync.json?.cache || []).find((c) => c.infohash === IH && c.service === "realdebrid");
+  ok(!!cf && cf.v === 1 && cf.cached === true && cf.signer_pubkey === pkUrl && typeof cf.sig === "string", "/hive/sync re-emits the engine-native signed CacheFact verbatim");
+  // the re-emitted sig is verifiable against the canonical signing bytes (engine merge_fact would accept it)
+  if (cf) {
+    const key = await subtle.importKey("raw", Buffer.from(node.pubKey, "base64"), { name: "Ed25519" }, false, ["verify"]);
+    const reStr = `vortx-cachefact-v1\n${cf.infohash}|${cf.service}|1|-1|||${cf.verified_at}|${cf.ttl}|${cf.signer_pubkey}`;
+    const sigBytes = Buffer.from(cf.sig.replace(/-/g, "+").replace(/_/g, "/") + "==", "base64");
+    const valid = await subtle.verify({ name: "Ed25519" }, key, sigBytes, te.encode(reStr));
+    ok(valid, "the re-emitted CacheFact signature verifies (engine-mergeable)");
+  }
 }
 
 console.log("public stats snapshot");

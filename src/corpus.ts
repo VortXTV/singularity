@@ -831,11 +831,41 @@ export function nodeIdFromDigest(sha256Digest: Uint8Array): string {
   return base64urlNoPad(sha256Digest.slice(0, 16));
 }
 
+// Engine CRDT bounds (crates/hive): a public fact's effective ttl caps at 6h, and a verified_at more than
+// 5 min in the future is rejected (clock-skew guard). The Worker enforces these when ingesting a signed fact.
+export const PUBLIC_TTL_CAP_SECS = 6 * 3600;
+export const MAX_SKEW_SECS = 300;
+
+/**
+ * Shape a stored signed_cache_facts row into the engine's native CacheFact JSON (crates/hive/src/fact.rs):
+ * { v, infohash, service, cached, file_idx?, size?, quality?, verified_at, ttl, signer_pubkey, sig }. Optionals
+ * are OMITTED when absent (file_idx -1 = whole torrent -> omitted) so the JSON is byte-shaped like the engine's
+ * serde output and merge_fact can consume it directly. signer_pubkey + sig are the engine's required PUBLIC
+ * attestation (a public key + signature, never a secret or debrid token), so this preserves facts-never-tokens.
+ */
+export function cacheFactWire(r: Row): Record<string, unknown> {
+  const f: Record<string, unknown> = {
+    v: 1,
+    infohash: r.info_hash,
+    service: r.service,
+    cached: num(r.cached) === 1,
+    verified_at: num(r.verified_at),
+    ttl: num(r.ttl),
+    signer_pubkey: r.signer_pubkey,
+    sig: r.sig,
+  };
+  const fi = num(r.file_idx);
+  if (fi >= 0) f.file_idx = fi;
+  if (r.size != null) f.size = num(r.size);
+  if (typeof r.quality === "string" && r.quality !== "") f.quality = r.quality;
+  return f;
+}
+
 export interface SyncDelta {
   since: number;
   cursor: number; // max timestamp seen; the node re-requests from here next
   torrents: Array<{ infoHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; fileIdx: unknown; tags: unknown; languages: unknown; episodes: unknown; addedAt: unknown }>;
-  cache: Array<{ infoHash: unknown; service: unknown; cached: unknown; confirmations: unknown; lastVerified: unknown }>;
+  cache: Array<Record<string, unknown>>; // engine-native signed CacheFacts (cacheFactWire); the engine merge_fact's these
   health: Array<{ infoHash: unknown; seeders: unknown; lastSeen: unknown }>;
   http: Array<{ url: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; languages: unknown; addedAt: unknown }>;
   nzb: Array<{ nzbHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; languages: unknown; addedAt: unknown }>;
@@ -846,13 +876,13 @@ export function assembleSyncDelta(
   since: number,
 ): SyncDelta {
   const torrents = parts.torrents.map((r) => ({ infoHash: r.info_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, fileIdx: r.file_idx, tags: r.tags, languages: r.languages, episodes: r.episodes, addedAt: r.added_at }));
-  const cache = parts.cache.map((r) => ({ infoHash: r.info_hash, service: r.service, cached: r.cached, confirmations: r.confirmations, lastVerified: r.last_verified }));
+  const cache = parts.cache.map((r) => cacheFactWire(r)); // engine-native signed CacheFacts (carry signer_pubkey + sig by design)
   const health = parts.health.map((r) => ({ infoHash: r.info_hash, seeders: r.seeders, lastSeen: r.last_seen }));
   const http = parts.http.map((r) => ({ url: r.url, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, languages: r.languages, addedAt: r.added_at }));
   const nzb = parts.nzb.map((r) => ({ nzbHash: r.nzb_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, languages: r.languages, addedAt: r.added_at }));
   const ts = [
     ...parts.torrents.map((r) => num(r.added_at)),
-    ...parts.cache.map((r) => num(r.last_verified)),
+    ...parts.cache.map((r) => num(r.stored_at)), // signed cache facts page by stored_at (server ms)
     ...parts.health.map((r) => num(r.last_seen)),
     ...parts.http.map((r) => num(r.added_at)),
     ...parts.nzb.map((r) => num(r.added_at)),

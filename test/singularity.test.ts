@@ -18,6 +18,7 @@ import {
   buildLeaderboard,
   buildStats,
   cacheFactSigningString,
+  cacheFactWire,
   nodeIdFromDigest,
   isCacheTrusted,
   isFresh,
@@ -572,18 +573,21 @@ console.log("assembleSyncDelta");
 {
   const parts = {
     torrents: [{ info_hash: "a".repeat(40), meta_id: "tt1", quality: "1080p", size: 8e9, source: "x", file_idx: null, tags: "hdr", added_at: 100, secret: "LEAK" }],
-    cache: [{ info_hash: "a".repeat(40), service: "torbox", cached: 1, confirmations: 3, last_verified: 200, node_id: "LEAKNODE" }],
+    // cache is now engine-native signed CacheFacts (carry signer_pubkey + sig by design); page by stored_at.
+    cache: [{ info_hash: "a".repeat(40), service: "torbox", file_idx: -1, signer_pubkey: "PK", cached: 1, size: null, quality: null, verified_at: 195, ttl: 86400, sig: "SIG", stored_at: 200, node_id: "LEAKNODE" }],
     health: [{ info_hash: "a".repeat(40), seeders: 50, last_seen: 150 }],
     http: [{ url: "https://x.example/y.mkv", meta_id: "tt1", quality: "1080p", size: 8e9, source: "h", tags: null, added_at: 120 }],
     nzb: [{ nzb_hash: "ab".repeat(16), meta_id: "tt1", quality: "2160p", size: 3e10, source: "n", tags: null, added_at: 180 }],
   };
   const d = assembleSyncDelta(parts, 0);
-  ok(d.cursor === 200, "cursor = max timestamp across all fact tables");
+  ok(d.cursor === 200, "cursor = max timestamp across all fact tables (cache via stored_at)");
   ok(assembleSyncDelta({ torrents: [], cache: [], health: [], http: [], nzb: [] }, 50).cursor === 50, "empty delta -> cursor stays at since");
   const blob = JSON.stringify(d).toLowerCase();
-  ok(!blob.includes("leak") && !blob.includes("node_id") && !blob.includes("nodeid") && !blob.includes("secret"), "delta carries facts only, no node ids / secrets");
+  // index facts (torrent/http/nzb) carry NO node attribution + no secrets; the internal node_id column is dropped.
+  ok(!blob.includes("leak") && !blob.includes("node_id") && !blob.includes("nodeid") && !blob.includes("secret"), "index facts carry no node ids / secrets (the internal node_id column is dropped)");
   ok(d.torrents[0].infoHash === "a".repeat(40) && d.torrents[0].tags === "hdr", "torrent fact shaped to the whitelist (camelCase)");
-  ok(d.cache[0].confirmations === 3 && d.cache[0].cached === 1, "cache fact carries the trust count + boolean");
+  // cache facts ARE engine-native signed CacheFacts: signer_pubkey + sig are required PUBLIC attestation (not a secret)
+  ok(d.cache[0].v === 1 && d.cache[0].cached === true && d.cache[0].signer_pubkey === "PK" && d.cache[0].sig === "SIG" && !("file_idx" in d.cache[0]), "cache fact is an engine-native signed CacheFact (whole-torrent omits file_idx)");
   ok(d.nzb[0].nzbHash === "ab".repeat(16) && d.http[0].url === "https://x.example/y.mkv", "nzb + http facts shaped");
 }
 
@@ -652,6 +656,11 @@ console.log("cacheFactSigningString (vortx-core crates/hive conformance vectors)
   // nodeIdFromDigest: 16 zero bytes -> 22 'A's (base64url no-pad); shape + length
   const id = nodeIdFromDigest(new Uint8Array(32));
   ok(id === "A".repeat(22) && /^[A-Za-z0-9_-]{22}$/.test(id), "nodeIdFromDigest = base64url(no-pad) of the first 16 digest bytes (22 chars)");
+  // cacheFactWire: a stored signed_cache_facts row -> the engine's native CacheFact JSON (optionals omitted)
+  const full = cacheFactWire({ info_hash: "a".repeat(40), service: "realdebrid", file_idx: 3, signer_pubkey: "PK", cached: 1, size: 2147483648, quality: "1080p", verified_at: 1718900000, ttl: 86400, sig: "SIG" });
+  ok(full.v === 1 && full.infohash === "a".repeat(40) && full.service === "realdebrid" && full.cached === true && full.file_idx === 3 && full.size === 2147483648 && full.quality === "1080p" && full.verified_at === 1718900000 && full.ttl === 86400 && full.signer_pubkey === "PK" && full.sig === "SIG", "cacheFactWire emits the full native CacheFact");
+  const whole = cacheFactWire({ info_hash: "b".repeat(40), service: "torbox", file_idx: -1, signer_pubkey: "K", cached: 0, size: null, quality: null, verified_at: 10, ttl: 20, sig: "S" });
+  ok(!("file_idx" in whole) && !("size" in whole) && !("quality" in whole) && whole.cached === false, "cacheFactWire omits file_idx(-1)/size/quality when absent (engine optionals)");
 }
 
 // --- public stats snapshot (aggregate counts only; safe coercion) ---

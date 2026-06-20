@@ -28,6 +28,10 @@ import {
   buildManifest,
   buildNativeManifest,
   nodeIdFromDigest,
+  cacheFactSigningString,
+  HIVE_DEBRID_SERVICES,
+  PUBLIC_TTL_CAP_SECS,
+  MAX_SKEW_SECS,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -69,7 +73,10 @@ const te = new TextEncoder();
 const enc = (s: string) => te.encode(s);
 
 function unb64(str: string): Uint8Array {
-  const bin = atob(str.replace(/-/g, "+").replace(/_/g, "/"));
+  // tolerate both base64 and base64url, with or without padding (the engine emits base64url no-pad).
+  let s = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
@@ -336,6 +343,52 @@ async function recordCache(env: Env, hash: string, service: string, nodeId: stri
   }
 }
 
+// Store a contributor's self-contained Ed25519-signed CacheFact verbatim (the engine-native artifact) so
+// /hive/sync can re-emit it and vortx-core's hive client can merge_fact it directly. Verifies the per-fact
+// signature over the canonical signing bytes (cacheFactSigningString) - the signer is the contributing node
+// (signerPubkeyB64 = the contribution pubKey). Enforces the engine's clock-skew guard. Returns true if stored.
+// This is ADDITIVE to recordCache (Singularity's own count-based read-side trust); a fact lacking a per-fact
+// sig still records a plain confirmation but produces no engine-mergeable artifact.
+async function recordSignedCacheFact(
+  env: Env,
+  f: { infohash: string; service: string; cached: boolean; fileIdx: number; size: number | null; quality: string | null; verifiedAt: number; ttl: number },
+  signerPubkeyB64: string,
+  sigB64: string,
+  now: number,
+): Promise<boolean> {
+  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(f.infohash) || !HIVE_DEBRID_SERVICES.includes(f.service)) return false;
+  // signer must be a 32-byte ed25519 key as base64url no-pad (43 chars) - the engine format. This also
+  // forecloses any canonical-injection path (a '|' or control char in signer_pubkey can't pass this charset).
+  if (!/^[A-Za-z0-9_-]{43}$/.test(signerPubkeyB64)) return false;
+  if (!Number.isFinite(f.verifiedAt) || !Number.isFinite(f.ttl)) return false;
+  const nowSec = Math.floor(now / 1000);
+  // ttl must be positive AND within the engine's 6h public cap; verified_at within [now-cap, now+skew] so a
+  // node cannot store a never-expiring fact or an epoch-era one (the engine caps on merge; we cap on ingest).
+  if (f.ttl <= 0 || f.ttl > PUBLIC_TTL_CAP_SECS) return false;
+  if (f.verifiedAt > nowSec + MAX_SKEW_SECS || f.verifiedAt < nowSec - PUBLIC_TTL_CAP_SECS) return false;
+  // quality rides mid-payload in the |-delimited signing bytes, so it must not contain '|' or control chars.
+  if (f.quality != null && (f.quality.length > 16 || /[|\x00-\x1f]/.test(f.quality))) return false;
+  const signingStr = cacheFactSigningString({ infohash: f.infohash, service: f.service, cached: f.cached, fileIdx: f.fileIdx < 0 ? null : f.fileIdx, size: f.size, quality: f.quality, verifiedAt: f.verifiedAt, ttl: f.ttl, signerPubkey: signerPubkeyB64 });
+  try {
+    const key = await crypto.subtle.importKey("raw", unb64(signerPubkeyB64) as BufferSource, { name: "Ed25519" }, false, ["verify"]);
+    const ok = await crypto.subtle.verify({ name: "Ed25519" }, key, unb64(sigB64) as BufferSource, enc(signingStr));
+    if (!ok) return false;
+  } catch {
+    return false;
+  }
+  // LWW: only overwrite an existing fact from this signer with a strictly newer verified_at.
+  await env.DB.prepare(
+    "INSERT INTO signed_cache_facts (info_hash, service, file_idx, signer_pubkey, cached, size, quality, verified_at, ttl, sig, stored_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(info_hash, service, file_idx, signer_pubkey) DO UPDATE SET " +
+      "cached = excluded.cached, size = excluded.size, quality = excluded.quality, verified_at = excluded.verified_at, " +
+      "ttl = excluded.ttl, sig = excluded.sig, stored_at = excluded.stored_at WHERE excluded.verified_at > signed_cache_facts.verified_at",
+  )
+    .bind(f.infohash, f.service, f.fileIdx, signerPubkeyB64, f.cached ? 1 : 0, f.size, f.quality, f.verifiedAt, f.ttl, sigB64, now)
+    .run();
+  return true;
+}
+
 // An HTTP URL is played verbatim by every client, so it is gated like the cache: record a DISTINCT-node
 // confirmation for (url, title), recompute the non-barred fresh count, and store it on http_streams.
 // handleStream only surfaces a URL once that count reaches MIN_CONFIRMATIONS.
@@ -446,6 +499,10 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
         .bind(nf.nzbHash, metaId, nf.quality, nf.size, nf.source, nf.tags.length ? nf.tags.join(",") : null, nf.languages.length ? nf.languages.join(",") : null, now)
         .run();
       if (nf.service && nf.cached) await recordCache(env, nf.nzbHash, nf.service, nodeId, now);
+      // engine-mergeable signed CacheFact (additive): stored verbatim if the fact carries a per-fact sig.
+      if (nf.service && typeof raw.cacheSig === "string") {
+        await recordSignedCacheFact(env, { infohash: nf.nzbHash, service: nf.service, cached: nf.cached, fileIdx: -1, size: nf.size, quality: nf.quality, verifiedAt: Number(raw.verifiedAt), ttl: Number(raw.ttl) }, pubKey, raw.cacheSig, now);
+      }
       accepted++;
       continue;
     }
@@ -475,6 +532,10 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     }
     // 3) debrid cache fact (the gold) - the boolean, never a link
     if (clean.service && clean.cached) await recordCache(env, clean.infoHash, clean.service, nodeId, now);
+    // engine-mergeable signed CacheFact (additive): stored verbatim if the fact carries a per-fact sig.
+    if (clean.service && typeof raw.cacheSig === "string") {
+      await recordSignedCacheFact(env, { infohash: clean.infoHash, service: clean.service, cached: clean.cached, fileIdx: clean.fileIdx ?? -1, size: clean.size, quality: clean.quality, verifiedAt: Number(raw.verifiedAt), ttl: Number(raw.ttl) }, pubKey, raw.cacheSig, now);
+    }
     accepted++;
   }
   // Credit the node for accepted facts (drives the leaderboard / "give to get").
@@ -622,7 +683,7 @@ async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
   const q = (sql: string) => env.DB.prepare(sql).bind(since, limit).all<Row>();
   const [torrents, cache, health, http, nzb] = await Promise.all([
     q("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at FROM torrents WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
-    q("SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE last_verified > ? ORDER BY last_verified ASC LIMIT ?"),
+    q("SELECT info_hash, service, file_idx, signer_pubkey, cached, size, quality, verified_at, ttl, sig, stored_at FROM signed_cache_facts WHERE stored_at > ? ORDER BY stored_at ASC LIMIT ?"),
     q("SELECT info_hash, seeders, last_seen FROM health WHERE last_seen > ? ORDER BY last_seen ASC LIMIT ?"),
     q("SELECT url, meta_id, quality, size, source, tags, languages, added_at FROM http_streams WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
     q("SELECT nzb_hash, meta_id, quality, size, source, tags, languages, added_at FROM nzbs WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),

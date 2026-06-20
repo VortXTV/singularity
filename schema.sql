@@ -82,6 +82,28 @@ CREATE TABLE IF NOT EXISTS cache_confirmations (
   PRIMARY KEY (info_hash, service, node_id)
 );
 
+-- VortX-native ENGINE-MERGEABLE signed cache facts (mirrors vortx-core crates/hive CacheFact, one row per
+-- (key, signer)). Distinct from cache_confirmations above: that table powers Singularity's own count-based
+-- read-side trust; THIS table stores each contributor's self-contained Ed25519-signed CacheFact verbatim so
+-- /hive/sync can re-emit it and the engine's hive client can feed it straight into merge_fact. signer_pubkey
+-- + sig are the engine's required PUBLIC attestation (not a secret, not a debrid token). file_idx -1 = whole
+-- torrent (engine sentinel). LWW by verified_at on conflict (keep the newest per signer).
+CREATE TABLE IF NOT EXISTS signed_cache_facts (
+  info_hash     TEXT NOT NULL CHECK (length(info_hash) IN (32, 40)),
+  service       TEXT NOT NULL,
+  file_idx      INTEGER NOT NULL DEFAULT -1,   -- -1 = whole torrent
+  signer_pubkey TEXT NOT NULL,                 -- base64url(no-pad) 32-byte ed25519 verifying key
+  cached        INTEGER NOT NULL,              -- 1/0; a signed negative is first-class
+  size          INTEGER,                       -- nullable (engine optional)
+  quality       TEXT,                          -- nullable (engine optional, <=16 chars, no '|')
+  verified_at   INTEGER NOT NULL,              -- unix SECONDS (inside the signed bytes)
+  ttl           INTEGER NOT NULL,              -- seconds (inside the signed bytes)
+  sig           TEXT NOT NULL,                 -- base64url(no-pad) 64-byte detached ed25519 sig
+  stored_at     INTEGER NOT NULL,              -- server epoch ms (delta-sync cursor)
+  PRIMARY KEY (info_hash, service, file_idx, signer_pubkey)
+);
+CREATE INDEX IF NOT EXISTS idx_signed_cache_stored ON signed_cache_facts (stored_at);
+
 -- Live swarm health: continuously re-scraped seeders so dead swarms are filtered BEFORE the click
 -- (many indexers serve stale counts; live freshness is our edge). Keyed by infohash, freshest wins.
 CREATE TABLE IF NOT EXISTS health (
