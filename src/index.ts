@@ -27,6 +27,7 @@ import {
   buildManifest,
   buildStreamResponse,
   parseMetaId,
+  assembleSyncDelta,
   CACHE_TTL_MS,
   MIN_CONFIRMATIONS,
   type CorpusStream,
@@ -455,6 +456,29 @@ async function handleCatalog(env: Env, type: string, idRaw: string): Promise<Res
   return json({ metas }, 200, true);
 }
 
+// Federation delta-sync: a self-hosted node pulls corpus facts newer than its cursor to bootstrap + stay
+// current (the pull half of the CometNet-style relay model; /hive/contribute is the push half). Facts only
+// (assembleSyncDelta re-applies the whitelist). Per-IP throttled; cursor-paginated via ?since=&limit=.
+async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
+  if (env.RL && !(await env.RL.limit({ key: `sync:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const since = Math.max(0, Number(url.searchParams.get("since") ?? "0") || 0);
+  const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") ?? "500") || 500));
+  type Row = Record<string, unknown>;
+  const q = (sql: string) => env.DB.prepare(sql).bind(since, limit).all<Row>();
+  const [torrents, cache, health, http, nzb] = await Promise.all([
+    q("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, added_at FROM torrents WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
+    q("SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE last_verified > ? ORDER BY last_verified ASC LIMIT ?"),
+    q("SELECT info_hash, seeders, last_seen FROM health WHERE last_seen > ? ORDER BY last_seen ASC LIMIT ?"),
+    q("SELECT url, meta_id, quality, size, source, tags, added_at FROM http_streams WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
+    q("SELECT nzb_hash, meta_id, quality, size, source, tags, added_at FROM nzbs WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
+  ]);
+  const delta = assembleSyncDelta(
+    { torrents: torrents.results ?? [], cache: cache.results ?? [], health: health.results ?? [], http: http.results ?? [], nzb: nzb.results ?? [] },
+    since,
+  );
+  return json(delta, 200, false);
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
@@ -481,6 +505,7 @@ export default {
     const sm = path.match(/^\/stream\/([^/]+)\/(.+)$/);
     if (req.method === "GET" && sm) return handleStream(env, decodeURIComponent(sm[1]), decodeURIComponent(sm[2]));
 
+    if (req.method === "GET" && path === "/hive/sync") return handleSync(env, url, ip);
     if (req.method === "POST" && path === "/hive/contribute") return handleContribute(req, env, ip);
     if (req.method === "POST" && path === "/hive/report") return handleReport(req, env, ip);
 

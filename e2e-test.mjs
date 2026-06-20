@@ -142,5 +142,14 @@ console.log("HTTP (3-node gated) + NZB sources");
   ok(!blob.includes("token") && !blob.includes("secret"), "no token/secret in the mixed-kind response");
 }
 
+console.log("federation delta-sync");
+{
+  const s = await get("/hive/sync?since=0&limit=100");
+  ok(s.status === 200 && Array.isArray(s.json?.torrents) && Array.isArray(s.json?.cache), "GET /hive/sync returns fact arrays");
+  ok(typeof s.json?.cursor === "number", "sync returns a cursor for the next pull");
+  const blob = JSON.stringify(s.json).toLowerCase();
+  ok(!blob.includes("node_id") && !blob.includes("pubkey") && !blob.includes("token"), "sync delta carries facts only (no node ids / pubkeys / tokens)");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

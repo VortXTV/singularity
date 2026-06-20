@@ -456,3 +456,40 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
   });
   return { streams };
 }
+
+// --- Federation delta-sync (the relay/pull half of the corpus) ---
+// A self-hosted node bootstraps + stays current by pulling facts newer than a cursor from the supernode.
+// assembleSyncDelta re-applies a strict field whitelist on the way OUT, so replication can never leak a
+// node id, pubkey, or any non-fact - the same facts-not-tokens invariant as ingest, enforced on read.
+type Row = Record<string, unknown>;
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+export interface SyncDelta {
+  since: number;
+  cursor: number; // max timestamp seen; the node re-requests from here next
+  torrents: Array<{ infoHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; fileIdx: unknown; tags: unknown; addedAt: unknown }>;
+  cache: Array<{ infoHash: unknown; service: unknown; cached: unknown; confirmations: unknown; lastVerified: unknown }>;
+  health: Array<{ infoHash: unknown; seeders: unknown; lastSeen: unknown }>;
+  http: Array<{ url: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; addedAt: unknown }>;
+  nzb: Array<{ nzbHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; addedAt: unknown }>;
+}
+
+export function assembleSyncDelta(
+  parts: { torrents: Row[]; cache: Row[]; health: Row[]; http: Row[]; nzb: Row[] },
+  since: number,
+): SyncDelta {
+  const torrents = parts.torrents.map((r) => ({ infoHash: r.info_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, fileIdx: r.file_idx, tags: r.tags, addedAt: r.added_at }));
+  const cache = parts.cache.map((r) => ({ infoHash: r.info_hash, service: r.service, cached: r.cached, confirmations: r.confirmations, lastVerified: r.last_verified }));
+  const health = parts.health.map((r) => ({ infoHash: r.info_hash, seeders: r.seeders, lastSeen: r.last_seen }));
+  const http = parts.http.map((r) => ({ url: r.url, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, addedAt: r.added_at }));
+  const nzb = parts.nzb.map((r) => ({ nzbHash: r.nzb_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, addedAt: r.added_at }));
+  const ts = [
+    ...parts.torrents.map((r) => num(r.added_at)),
+    ...parts.cache.map((r) => num(r.last_verified)),
+    ...parts.health.map((r) => num(r.last_seen)),
+    ...parts.http.map((r) => num(r.added_at)),
+    ...parts.nzb.map((r) => num(r.added_at)),
+  ];
+  const cursor = ts.length ? Math.max(...ts) : since;
+  return { since, cursor, torrents, cache, health, http, nzb };
+}

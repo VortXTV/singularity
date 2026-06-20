@@ -39,7 +39,8 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/:config/stream/:type/:id.json` | none | Same, filtered by your config (e.g. cache status only for your debrid services) |
 | GET | `/catalog/:type/singularity.trending.json` | none | The always-on Trending catalog (titles the corpus has the most sources for, enriched via public Cinemeta) |
 | GET | `/:config/catalog/:type/:id.json` | none | Trending (live) + recommendation rows (recs engine WIP - responds gracefully) |
-| POST | `/hive/contribute` | Ed25519 sig | A node submits signed facts (torrent index + cache booleans + seeders) |
+| POST | `/hive/contribute` | Ed25519 sig | A node pushes signed facts (torrent index + cache booleans + seeders) |
+| GET | `/hive/sync?since=&limit=` | none | A node pulls corpus facts newer than its cursor (bootstrap + delta-sync; facts only) |
 | POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" report (seam for the penalty system) |
 | GET | `/health` | none | Service status |
 
@@ -109,8 +110,9 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
 
 ## Not yet implemented (later federation work)
 
-- Gossip / CRDT delta sync between self-hosted nodes (Cloudflare is the bootstrap supernode + full
-  corpus mirror; home nodes push signed telemetry up).
+- Peer-to-peer gossip between self-hosted nodes (the supernode relay model is in place: nodes push facts
+  via `/hive/contribute` and bootstrap/delta-sync via `/hive/sync`; direct node-to-node gossip + signed
+  node telemetry to the dashboard are the remaining federation pieces).
 - Anti-cam / fake-infohash trust corpus (today any stored torrent from a non-barred node is surfaced;
   only the *cache* trust gate is enforced).
 - Penalty adjudication (re-verify a report before penalizing the contributor or the reporter).
