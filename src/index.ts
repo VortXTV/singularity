@@ -26,6 +26,7 @@ import {
   isFresh,
   isNodeBarred,
   buildManifest,
+  buildNativeManifest,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -148,6 +149,11 @@ async function verifyNode(
 
 async function handleManifest(): Promise<Response> {
   return json(buildManifest(), 200, true);
+}
+
+// VortX-native manifest (vortx-source/1). VortX requests this FIRST; Stremio + Nuvio keep using /manifest.json.
+function handleNativeManifest(req: Request): Response {
+  return json(buildNativeManifest(new URL(req.url).origin), 200, true);
 }
 
 async function handleStream(env: Env, type: string, idWithExt: string, config?: SingularityConfig): Promise<Response> {
@@ -797,6 +803,7 @@ export default {
       return json({ service: "singularity", status: "ok", manifest: "/manifest.json", note: "dormant groundwork; public hive-mind ships 0.4.0+" });
     }
     if (req.method === "GET" && path === "/manifest.json") return handleManifest();
+    if (req.method === "GET" && (path === "/manifest.vortx.json" || path === "/vortx-source.json")) return handleNativeManifest(req);
     if (req.method === "GET" && path === "/configure") return handleConfigure(req);
 
     // Configured routes: /:config/(manifest.json | stream/... | catalog/...) where :config = base64url(JSON).

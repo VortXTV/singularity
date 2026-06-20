@@ -373,6 +373,41 @@ export function buildManifest(version = "0.1.0"): Manifest {
   };
 }
 
+// The native manifest schema tag the vortx-core source crate recognizes (a strict superset of the Stremio
+// manifest). Emitting this makes the engine classify Singularity as SourceKind::NativeVortx with its
+// privileged hooks ON, instead of lifting it as a generic StremioAddon with all hooks off.
+export const NATIVE_SCHEMA = "vortx-source/1";
+
+/**
+ * The VortX-NATIVE manifest (vortx-source/1). Served at a dedicated route so VortX requests it FIRST; the
+ * default /manifest.json stays the plain Stremio manifest (the secondary fallback for Stremio + Nuvio). The
+ * declared hooks are the honest capabilities Singularity backs: it yields infohashes with hive-sourced cache
+ * status, it IS the hive corpus (contributes + consumes), and it now emits structured ranking inputs (the
+ * behaviorHints.vortx side-channel). Manifest `signature` is intentionally omitted until the canonical signing
+ * matches the engine's canonical.rs byte-for-byte (engine-coordinated, shared conformance vectors).
+ */
+export function buildNativeManifest(origin: string, version = "0.1.0"): Record<string, unknown> {
+  return {
+    schema: NATIVE_SCHEMA,
+    id: "tv.vortx.singularity",
+    version,
+    name: "Singularity",
+    kind: "native_vortx",
+    capabilities: ["stream", "catalog"],
+    types: ["movie", "series"],
+    idPrefixes: ["tt"],
+    transport: { kind: "federated", endpoint: `${origin.replace(/\/+$/, "")}/hive` },
+    streaming: false, // a /stream request returns one JSON batch today, not an incremental stream
+    prefetch: ["next-episode"], // the engine may prefetch the next episode's sources from the corpus
+    debrid: { yieldsInfohash: true, cachedCheck: "hive" },
+    hive: { contributes: true, consumes: true, factTtlSec: Math.floor(CACHE_TTL_MS / 1000) },
+    ranking: { emitsScoreInputs: true }, // structured inputs live in behaviorHints.vortx on every stream
+    config: { scope: "per-profile" },
+    trust: "community",
+    permissions: ["hive:read", "hive:write", "debrid:read"],
+  };
+}
+
 export interface ParsedMetaId {
   imdb: string | null;
   season: number | null;
@@ -711,11 +746,27 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
       out.url = s.url; // a stable PUBLIC url (tokenless, guaranteed by sanitizeHttpFact at ingest)
     } else if (kind === "nzb" && s.nzbHash) {
       // No playable url here: the VortX app resolves the nzb on-device with the user's own provider.
-      out.behaviorHints = { ...out.behaviorHints, singularityNzb: s.nzbHash };
+      out.behaviorHints = { ...out.behaviorHints, singularityNzb: s.nzbHash }; // deprecated alias; see behaviorHints.vortx.nzbHash
     } else if (s.infoHash) {
       out.infoHash = s.infoHash; // torrent: client mints the magnet / resolves debrid with its own token
       if (typeof s.fileIdx === "number") out.fileIdx = s.fileIdx;
     }
+    // VortX-FIRST machine-readable side-channel: the vortx-core engine reads STRUCTURED ranking + debrid +
+    // season-pack signals from behaviorHints.vortx instead of regex-parsing the title string. It is additive
+    // and namespaced, so generic Stremio (2nd) and Nuvio (3rd) clients simply ignore the unknown key - the
+    // plain url/infoHash/fileIdx/title fields above remain a valid stream for them.
+    const vortx: Record<string, unknown> = { kind };
+    if (s.cachedOn.length) vortx.cachedServices = s.cachedOn;
+    if (typeof s.seeders === "number" && s.seeders > 0) vortx.seeders = s.seeders;
+    if (typeof s.size === "number" && s.size > 0) vortx.sizeBytes = s.size;
+    if (s.quality) vortx.resolution = s.quality;
+    if (s.languages && s.languages.length) vortx.languages = s.languages;
+    if (s.tags && s.tags.length) vortx.tags = s.tags;
+    if (typeof s.sources === "number" && s.sources > 1) vortx.sources = s.sources;
+    if (s.pack) vortx.pack = true;
+    if (typeof out.fileIdx === "number") vortx.fileIdx = out.fileIdx;
+    if (kind === "nzb" && s.nzbHash) vortx.nzbHash = s.nzbHash;
+    out.behaviorHints = { ...out.behaviorHints, vortx };
     return out;
   });
   return { streams };

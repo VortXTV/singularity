@@ -21,6 +21,7 @@ import {
   isFresh,
   isNodeBarred,
   buildManifest,
+  buildNativeManifest,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -145,6 +146,19 @@ console.log("buildManifest");
   ok(Array.isArray(m.idPrefixes) && m.idPrefixes.includes("tt"), "manifest declares the tt id prefix");
   const trend = (m.catalogs || []).find((c) => /trending/i.test(c.id));
   ok(trend && Array.isArray(trend.extra) && trend.extra.some((e) => e.name === "search"), "the trending catalog declares the search extra");
+}
+
+// --- VortX-native manifest (vortx-source/1): the engine reads this FIRST, Stremio/Nuvio use /manifest.json ---
+console.log("buildNativeManifest (vortx-source/1)");
+{
+  const nm = buildNativeManifest("https://singularity.vortx.tv");
+  ok(nm.schema === "vortx-source/1" && nm.kind === "native_vortx", "declares the vortx-source/1 schema + native_vortx kind");
+  ok(Array.isArray(nm.capabilities) && nm.capabilities.includes("stream") && nm.capabilities.includes("catalog"), "declares stream + catalog capabilities");
+  ok(nm.transport && nm.transport.kind === "federated" && nm.transport.endpoint === "https://singularity.vortx.tv/hive", "federated transport points at /hive");
+  ok(nm.debrid && nm.debrid.yieldsInfohash === true && nm.debrid.cachedCheck === "hive", "debrid hook: yields infohash, cache via hive");
+  ok(nm.hive && nm.hive.contributes === true && nm.hive.consumes === true, "hive hook: contributes + consumes");
+  ok(nm.ranking && nm.ranking.emitsScoreInputs === true, "ranking hook: emits structured score inputs (the vortx side-channel)");
+  ok(nm.config && nm.config.scope === "per-profile" && nm.signature === undefined, "per-profile config; manifest unsigned until canonical signing lands");
 }
 
 // --- corpus-scoped catalog search: parse the extra + intersect candidates with corpus presence ---
@@ -323,6 +337,10 @@ console.log("buildStreamResponse (mixed kinds)");
   // no token, magnet, or userinfo anywhere in the response
   const blob = JSON.stringify(res).toLowerCase();
   ok(!blob.includes("token") && !blob.includes("magnet:") && !blob.includes("secret") && !blob.includes("@"), "no token/magnet/userinfo in the response");
+  // VortX-first side-channel: every stream carries machine-readable behaviorHints.vortx with the kind + signals
+  ok(!!t && t.behaviorHints && t.behaviorHints.vortx && t.behaviorHints.vortx.kind === "torrent" && t.behaviorHints.vortx.resolution === "2160p" && t.behaviorHints.vortx.seeders === 10, "torrent stream carries behaviorHints.vortx (kind/resolution/seeders)");
+  ok(!!n && n.behaviorHints.vortx.kind === "nzb" && n.behaviorHints.vortx.nzbHash === "ab".repeat(16) && (n.behaviorHints.vortx.cachedServices || []).includes("torbox"), "nzb stream carries vortx.kind=nzb + nzbHash + cachedServices");
+  ok(!!h && h.behaviorHints.vortx.kind === "http", "http stream carries vortx.kind=http");
 }
 
 // --- config-driven filter + sort pipeline (the AIOStreams-class runtime) ---
