@@ -216,7 +216,16 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
     corpus.push({ kind: "nzb", nzbHash: r.nzb_hash, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: (cacheByHash.get(r.nzb_hash) ?? []).filter(allowUsenet), trusted: true, lastVerified: r.added_at });
   }
 
-  return json(buildStreamResponse(corpus, now), 200, true);
+  const opts = config
+    ? {
+        resolutions: config.filters.resolutions,
+        excludeRegex: config.filters.excludeRegex || undefined,
+        minSeeders: config.filters.minSeeders,
+        maxSizeGB: config.filters.maxSizeGB,
+        sort: config.sort,
+      }
+    : undefined;
+  return json(buildStreamResponse(corpus, now, opts), 200, true);
 }
 
 // Record a DISTINCT-node cache confirmation for a content hash + service (a torrent infohash OR an nzb

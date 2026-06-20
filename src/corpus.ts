@@ -273,14 +273,61 @@ function streamTitle(s: CorpusStream): string {
   return meta ? `${head}\n${meta}${src}` : `${head}${src}`;
 }
 
+// The user's stream preferences (mapped from SingularityConfig by the Worker). Kept as a lightweight local
+// shape so corpus.ts stays decoupled from config.ts (config.ts depends on corpus.ts, never the reverse).
+export interface StreamFilterOptions {
+  resolutions?: string[]; // allow only these (empty/undefined = all)
+  excludeRegex?: string; // drop sources whose "source quality" text matches
+  minSeeders?: number; // torrents only
+  maxSizeGB?: number;
+  sort?: string[]; // ordered keys: cached | resolution | seeders | size
+}
+
+const RES_RANK: Record<string, number> = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1, SD: 0 };
+const resRank = (q: string | null): number => RES_RANK[q ?? "SD"] ?? 0;
+
+/** AIOStreams-class filters: resolution allowlist, max size, min seeders (torrents), exclude-regex. */
+function applyFilters(streams: CorpusStream[], opts: StreamFilterOptions): CorpusStream[] {
+  let re: RegExp | null = null;
+  if (opts.excludeRegex) {
+    try {
+      re = new RegExp(opts.excludeRegex, "i");
+    } catch {
+      re = null; // an invalid pattern is ignored, never fatal
+    }
+  }
+  return streams.filter((s) => {
+    if (opts.resolutions && opts.resolutions.length > 0 && !opts.resolutions.includes(s.quality ?? "SD")) return false;
+    if (opts.maxSizeGB && opts.maxSizeGB > 0 && s.size != null && s.size > opts.maxSizeGB * 1e9) return false;
+    if (opts.minSeeders && opts.minSeeders > 0 && kindOf(s) === "torrent" && (s.seeders ?? 0) < opts.minSeeders) return false;
+    if (re && re.test(`${s.source ?? ""} ${s.quality ?? ""}`)) return false;
+    return true;
+  });
+}
+
+/** Comparator from the user's ordered sort keys; the first key that distinguishes two streams wins. */
+function sortByKeys(keys: string[]): (a: CorpusStream, b: CorpusStream) => number {
+  return (a, b) => {
+    for (const k of keys) {
+      let d = 0;
+      if (k === "cached") d = (b.cachedOn.length > 0 ? 1 : 0) - (a.cachedOn.length > 0 ? 1 : 0);
+      else if (k === "resolution") d = resRank(b.quality) - resRank(a.quality);
+      else if (k === "seeders") d = (b.seeders ?? 0) - (a.seeders ?? 0);
+      else if (k === "size") d = (b.size ?? 0) - (a.size ?? 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  };
+}
+
 /**
  * Turn corpus rows into a Stremio stream response. Surfaces only trusted + fresh facts; drops dead
- * uncached torrent swarms (HTTP + NZB are always resolvable so they are kept); ranks cached ahead of
- * uncached then by seeders; and emits the right shape per kind: torrent -> infoHash, http -> public url,
- * nzb -> an on-device-resolve marker. No tokenized url ever appears.
+ * uncached torrent swarms (HTTP + NZB are always resolvable so they are kept); applies the user's filters
+ * (opts) and sort (their order, else cached-first then seeders); and emits the right shape per kind:
+ * torrent -> infoHash, http -> public url, nzb -> an on-device-resolve marker. No tokenized url ever appears.
  */
-export function buildStreamResponse(rows: CorpusStream[], now: number): { streams: StremioStream[] } {
-  const shown = rows
+export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: StreamFilterOptions): { streams: StremioStream[] } {
+  let shown = rows
     .filter((s) => s.trusted)
     .filter((s) => isFresh(s.lastVerified, now))
     // Dead-swarm drop applies ONLY to torrents; an HTTP URL and an NZB are resolvable without seeders.
@@ -288,12 +335,17 @@ export function buildStreamResponse(rows: CorpusStream[], now: number): { stream
     // Defense in depth: never serve an http row whose url is not a stable public URL (catches anything
     // that slipped past ingest, or a future write-path regression).
     .filter((s) => kindOf(s) !== "http" || isPublicHttpUrl(s.url));
-  shown.sort((a, b) => {
-    const ac = a.cachedOn.length > 0 ? 1 : 0;
-    const bc = b.cachedOn.length > 0 ? 1 : 0;
-    if (ac !== bc) return bc - ac; // cached first
-    return (b.seeders ?? 0) - (a.seeders ?? 0); // then by seeders
-  });
+  if (opts) shown = applyFilters(shown, opts);
+  shown.sort(
+    opts?.sort && opts.sort.length > 0
+      ? sortByKeys(opts.sort)
+      : (a, b) => {
+          const ac = a.cachedOn.length > 0 ? 1 : 0;
+          const bc = b.cachedOn.length > 0 ? 1 : 0;
+          if (ac !== bc) return bc - ac; // default: cached first
+          return (b.seeders ?? 0) - (a.seeders ?? 0); // then by seeders
+        },
+  );
   const streams: StremioStream[] = shown.map((s) => {
     const kind = kindOf(s);
     const out: StremioStream = {
