@@ -146,9 +146,9 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
   // The corpus serves three kinds for a title: torrents, direct/HTTP public streams, and NZB/Usenet.
   // (LIMITs keep the cache IN-clause below D1's 100 bound-parameter cap: 50 torrent + 30 nzb hashes = 80.)
   const torrents = (
-    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, tags, languages, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
+    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, tags, languages, sources, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
       .bind(metaId)
-      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; added_at: number }>()
+      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; added_at: number }>()
   ).results ?? [];
   const httpRows = (
     // Only HTTP URLs confirmed by >= MIN_CONFIRMATIONS distinct nodes are surfaced (gated like the cache).
@@ -215,6 +215,7 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
       fileIdx: r.file_idx,
       tags: r.tags ? r.tags.split(",") : [],
       languages: r.languages ? r.languages.split(",") : [],
+      sources: r.sources ?? 1,
     });
   }
   for (const r of httpRows) {
@@ -236,6 +237,7 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         excludeTags: config.filters.excludeTags,
         includeLanguages: config.filters.includeLanguages,
         excludeLanguages: config.filters.excludeLanguages,
+        minSourceNodes: config.filters.minSourceNodes,
         maxResults: config.filters.maxResults,
         maxPerResolution: config.filters.maxPerResolution,
         dedup: config.filters.dedup,
@@ -310,6 +312,27 @@ async function recordHttpConfirmation(env: Env, url: string, metaId: string, nod
     .first<{ n: number }>();
   await env.DB.prepare("UPDATE http_streams SET confirmations = ? WHERE url = ? AND meta_id = ?")
     .bind(cnt?.n ?? 1, url, metaId)
+    .run();
+}
+
+// Anti-fake-infohash: record a DISTINCT-node confirmation for a torrent (infoHash -> title) association and
+// store the non-barred fresh count as torrents.sources. A fake association from one node stays at sources=1;
+// readers who set minSourceNodes>1 then filter it out, while a real torrent the crowd vouches for survives.
+async function recordTorrentConfirmation(env: Env, infoHash: string, metaId: string, nodeId: string, now: number): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO torrent_confirmations (info_hash, meta_id, node_id, ts) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(info_hash, meta_id, node_id) DO UPDATE SET ts = excluded.ts",
+  )
+    .bind(infoHash, metaId, nodeId, now)
+    .run();
+  const cnt = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM torrent_confirmations tc JOIN nodes n ON n.id = tc.node_id " +
+      "WHERE tc.info_hash = ? AND tc.meta_id = ? AND n.banned = 0 AND tc.ts > ?",
+  )
+    .bind(infoHash, metaId, now - CACHE_TTL_MS)
+    .first<{ n: number }>();
+  await env.DB.prepare("UPDATE torrents SET sources = ? WHERE info_hash = ? AND meta_id = ?")
+    .bind(cnt?.n ?? 1, infoHash, metaId)
     .run();
 }
 
@@ -395,6 +418,8 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     )
       .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, clean.languages.length ? clean.languages.join(",") : null, now)
       .run();
+    // 1b) distinct-contributor count for this association (anti-fake-infohash signal -> torrents.sources)
+    await recordTorrentConfirmation(env, clean.infoHash, metaId, nodeId, now);
     // 2) live swarm health (re-scraped each time; freshest wins)
     if (clean.seeders != null) {
       await env.DB.prepare(

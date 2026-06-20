@@ -134,6 +134,7 @@ export function renderConfigurePage(baseUrl: string): string {
   <div class="row" style="margin-top:14px">
     <label class="toggle"><input id="hdrOnly" type="checkbox"> HDR / Dolby Vision only</label>
     <label class="toggle"><input id="excludeCam" type="checkbox" checked> Exclude CAM / TS</label>
+    <div class="field"><label class="lbl" for="minSourceNodes">Min source nodes (1 = off)</label><input id="minSourceNodes" type="number" min="1" max="10" value="1"></div>
   </div>
 </section>
 
@@ -199,6 +200,7 @@ export function renderConfigurePage(baseUrl: string): string {
         hdrOnly: document.getElementById('hdrOnly').checked, excludeCam: document.getElementById('excludeCam').checked,
         includeTags: vals('includeTags'), excludeTags: vals('excludeTags'),
         includeLanguages: vals('includeLanguages'), excludeLanguages: vals('excludeLanguages'),
+        minSourceNodes: Math.min(10, Math.max(1, parseInt(document.getElementById('minSourceNodes').value||'1',10)||1)),
         maxResults: Math.min(200, Math.max(0, parseInt(document.getElementById('maxResults').value||'0',10)||0)),
         maxPerResolution: Math.min(50, Math.max(0, parseInt(document.getElementById('maxPerResolution').value||'0',10)||0)),
         dedup: document.getElementById('dedup').checked,

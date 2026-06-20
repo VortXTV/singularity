@@ -38,10 +38,21 @@ CREATE TABLE IF NOT EXISTS torrents (
   file_idx  INTEGER,                            -- file index within a multi-file torrent (Stremio fileIdx)
   tags      TEXT,                               -- comma-joined normalized release tags (hdr,dv,atmos,hevc,cam,...)
   languages TEXT,                               -- comma-joined audio-language slugs (en,es,fr,...,multi,dual)
+  sources   INTEGER NOT NULL DEFAULT 1,         -- distinct non-barred nodes vouching for this association (anti-fake-infohash)
   added_at  INTEGER NOT NULL,                   -- last-seen (touched on re-contribution)
   PRIMARY KEY (info_hash, meta_id)
 );
 CREATE INDEX IF NOT EXISTS idx_torrents_meta ON torrents (meta_id);
+
+-- One row per (torrent association, confirming node) so the `sources` count above is DISTINCT nodes, not
+-- re-posts. A fake infohash->title association from one node stays at sources=1; the crowd raises real ones.
+CREATE TABLE IF NOT EXISTS torrent_confirmations (
+  info_hash TEXT NOT NULL,
+  meta_id   TEXT NOT NULL,
+  node_id   TEXT NOT NULL,
+  ts        INTEGER NOT NULL,
+  PRIMARY KEY (info_hash, meta_id, node_id)
+);
 
 -- Debrid cache map (the killer feature): which service has an infohash cached. BOOLEAN only - never a
 -- resolved link, never a token. Trusted once 3 independent nodes confirm OR the reader's own debrid

@@ -55,7 +55,7 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
     debridServices: ["torbox", "EVIL!", "realdebrid", "torbox"], // unknown dropped, dupes collapsed, lowercased
     usenetServices: ["easynews", "nope"],
     addons: ["https://ok.example/manifest.json", "ftp://bad", "not a url"],
-    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"], includeLanguages: ["EN", "klingon", "ja"], excludeLanguages: ["es", "bogus"], maxResults: 9999, maxPerResolution: 999 },
+    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"], includeLanguages: ["EN", "klingon", "ja"], excludeLanguages: ["es", "bogus"], minSourceNodes: 99, maxResults: 9999, maxPerResolution: 999 },
     sort: ["cached", "seeders", "boguskey"],
     recommendations: { enabled: true, historySource: "myspace" }, // invalid source -> default
     // secret-looking junk that MUST be dropped:
@@ -73,6 +73,7 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
   ok(v.filters.excludeTags.includes("av1") && !v.filters.excludeTags.includes("junk"), "keeps known exclude tags, drops unknown");
   ok(v.filters.includeLanguages.includes("en") && v.filters.includeLanguages.includes("ja") && !v.filters.includeLanguages.includes("klingon"), "keeps known include languages (lowercased), drops unknown");
   ok(v.filters.excludeLanguages.includes("es") && !v.filters.excludeLanguages.includes("bogus"), "keeps known exclude languages, drops unknown");
+  ok(v.filters.minSourceNodes === 10, "clamps minSourceNodes to the 1..10 range");
   ok(v.filters.maxResults === 200 && v.filters.maxPerResolution === 50, "clamps result limits to their caps");
   ok(!v.sort.includes("boguskey"), "drops unknown sort key");
   ok(["library", "trakt", "simkl"].includes(v.recommendations.historySource), "normalizes recommendations history source");

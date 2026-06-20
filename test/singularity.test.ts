@@ -352,6 +352,23 @@ console.log("sanitizeLanguages + language filters");
   ok(!r.streams.some((s) => s.infoHash === B) && r.streams.some((s) => s.infoHash === A) && r.streams.some((s) => s.infoHash === C), "excludeLanguages drops sources in an excluded language, keeps others");
 }
 
+// --- anti-fake-infohash: minSourceNodes gates low-confidence torrent associations ---
+console.log("minSourceNodes (anti-fake-infohash)");
+{
+  const now = 7_800_000_000_000;
+  const base = (over) => ({ kind: "torrent", infoHash: "0".repeat(40), quality: "1080p", size: 8e9, source: "x", seeders: 50, cachedOn: [], trusted: true, lastVerified: now - 1000, ...over });
+  const A = "a".repeat(40), B = "b".repeat(40);
+  const rows = [base({ infoHash: A, sources: 1 }), base({ infoHash: B, sources: 3 })];
+  let r = buildStreamResponse(rows, now, { minSourceNodes: 2 });
+  ok(!r.streams.some((s) => s.infoHash === A) && r.streams.some((s) => s.infoHash === B), "minSourceNodes=2 drops a single-node association, keeps a 3-node one");
+  r = buildStreamResponse(rows, now, { minSourceNodes: 1 });
+  ok(r.streams.length === 2, "minSourceNodes=1 is off (default): nothing gated");
+  // http is gated by its own node mechanism, not minSourceNodes; an http row with no `sources` survives.
+  const httpRow = { kind: "http", url: "https://cdn.example/a.mkv", quality: "1080p", size: 8e9, source: "x", seeders: null, cachedOn: [], trusted: true, lastVerified: now - 1000 };
+  r = buildStreamResponse([httpRow], now, { minSourceNodes: 5 });
+  ok(r.streams.some((s) => s.url === "https://cdn.example/a.mkv"), "minSourceNodes does not gate http sources (they have their own node gate)");
+}
+
 // --- result limits (cap total + per-resolution, applied after sort so the best survive) ---
 console.log("result limits");
 {

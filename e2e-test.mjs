@@ -146,6 +146,27 @@ console.log("HTTP (3-node gated) + NZB sources");
   ok(!blob.includes("token") && !blob.includes("secret"), "no token/secret in the mixed-kind response");
 }
 
+console.log("anti-fake-infohash: minSourceNodes gates single-node associations");
+{
+  const b64url = (s) => Buffer.from(s, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const META4 = "tt0468569"; // The Dark Knight
+  const FAKE = "4".repeat(40);
+  const n1 = await newNode();
+  await contribute(n1, [{ metaId: META4, infoHash: FAKE, quality: "1080p", source: "x", seeders: 9 }]); // 1 node only
+  // default config (minSourceNodes=1): the single-node association still surfaces
+  let streams = (await get(`/stream/movie/${META4}.json`)).json?.streams || [];
+  ok(streams.some((s) => s.infoHash === FAKE), "single-node torrent surfaces by default (minSourceNodes=1)");
+  // a reader who requires >=2 distinct nodes filters the low-confidence association out
+  const cfg = b64url(JSON.stringify({ filters: { minSourceNodes: 2 } }));
+  streams = (await get(`/${cfg}/stream/movie/${META4}.json`)).json?.streams || [];
+  ok(!streams.some((s) => s.infoHash === FAKE), "minSourceNodes=2 hides the single-node association (anti-fake-infohash)");
+  // a second distinct node vouches -> sources rises to 2 -> it passes the gate
+  const n2 = await newNode();
+  await contribute(n2, [{ metaId: META4, infoHash: FAKE, quality: "1080p", source: "y", seeders: 9 }]);
+  streams = (await get(`/${cfg}/stream/movie/${META4}.json`)).json?.streams || [];
+  ok(streams.some((s) => s.infoHash === FAKE), "after a 2nd distinct node vouches, it passes the minSourceNodes=2 gate");
+}
+
 console.log("federation delta-sync");
 {
   const s = await get("/hive/sync?since=0&limit=100");

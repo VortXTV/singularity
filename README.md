@@ -57,8 +57,8 @@ URL path (`/:config/...`). It exposes the full feature surface:
   same facts-not-tokens line as the corpus). `validateConfig` is a strict whitelist that drops anything
   secret-looking.
 - **Your add-ons** to aggregate (bring any manifest URLs), **Filters** (resolutions, min-seeders, max-size,
-  HDR-only, exclude-CAM, exclude regex, per-tag include/exclude, **audio-language include/exclude**), **Sort**
-  keys, **Format** preset, **Proxy** toggle.
+  HDR-only, exclude-CAM, exclude regex, per-tag include/exclude, **audio-language include/exclude**,
+  **min source nodes**), **Sort** keys, **Format** preset, **Proxy** toggle.
 - **Ratings on posters** - bake IMDb / Rotten Tomatoes / TMDB ratings + quality badges onto poster art
   (adds the `meta` resource).
 - **Recommendations** - personalized "Top Picks for You" / "Because You Watched" catalogs from your taste
@@ -72,6 +72,10 @@ fetchers are the next build phases (the schema + manifest + routing ship now).
 
 - A **cache claim is trusted** only after **3 independent nodes** confirm it (distinct-node counting via
   `cache_confirmations`), **or** the reader's own debrid confirms. `isCacheTrusted` in `src/corpus.ts`.
+- A **torrent association** (this infohash serves this title) carries a **distinct-contributor count**
+  (`torrents.sources`, counted via `torrent_confirmations`). It is not hard-gated (a young corpus has
+  one-node entries), but a reader can require `minSourceNodes` >= N to filter out low-confidence / fake
+  associations - a single troll infohash stays at `sources` = 1.
 - Every cache/health fact has a **TTL** (7 days); recent verifications outrank old ones. Stale facts and
   dead-uncached swarms are filtered before the client sees them.
 - A node is identified by an **Ed25519 keypair**; `nodeId = sha256(pubkey)` so it cannot impersonate
@@ -89,8 +93,9 @@ The corpus serves **three source kinds** for a title: **torrents**, **direct/HTT
 **NZB/Usenet**. Tables: `nodes` (trust/penalty), `torrents` (infohash -> title index), `http_streams`
 (stable public URLs -> title; tokenless, safe to play on any client), `nzbs` (nzb-hash -> title; resolved
 on-device with the user's own provider), `cache_facts` + `cache_confirmations` (the debrid/usenet-cache map
-with distinct-node trust - shared by torrent infohashes and nzb hashes), `health` (live torrent seeders),
-`reports` (anti-poisoning seam). Idempotent + **non-destructive** - never `DROP`; additive `ALTER`s go in a
+with distinct-node trust - shared by torrent infohashes and nzb hashes), `torrent_confirmations` (distinct
+nodes per torrent association -> `torrents.sources`, the anti-fake-infohash signal), `health` (live torrent
+seeders), `reports` (anti-poisoning seam). Idempotent + **non-destructive** - never `DROP`; additive `ALTER`s go in a
 numbered `migrations/` file. See [DEPLOY.md](DEPLOY.md) for the migration discipline.
 
 A contributed torrent infohash is accepted in either ecosystem form - **40-hex** or the **32-char base32**
@@ -124,7 +129,8 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
 - Peer-to-peer gossip between self-hosted nodes (the supernode relay model is in place: nodes push facts
   via `/hive/contribute` and bootstrap/delta-sync via `/hive/sync`; direct node-to-node gossip + signed
   node telemetry to the dashboard are the remaining federation pieces).
-- Anti-cam / fake-infohash trust corpus (today any stored torrent from a non-barred node is surfaced;
-  only the *cache* trust gate is enforced).
+- Heuristic anti-cam beyond tags (CAM/TS releases are already droppable via `excludeCam` + the tag layer,
+  and a fake infohash->title association now carries a distinct-node confidence count - `torrents.sources`,
+  gated opt-in by `minSourceNodes`; automatic cam detection from non-tag signals is the remaining piece).
 - Node management surfaces (the dashboard "Nodes" section + each node's localhost UI).
 - Contribution-gated reads.

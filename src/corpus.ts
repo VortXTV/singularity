@@ -351,6 +351,7 @@ export interface CorpusStream {
   fileIdx?: number | null;
   tags?: string[]; // normalized release tags (hdr/dv/atmos/hevc/cam/...)
   languages?: string[]; // audio-language slugs (en/es/fr/.../multi/dual)
+  sources?: number; // torrent: distinct non-barred nodes that vouch for this (infoHash->title) association
 }
 
 // A Stremio stream object. A torrent carries `infoHash` (the client mints the magnet / resolves debrid
@@ -422,6 +423,7 @@ export interface StreamFilterOptions {
   excludeTags?: string[]; // drop sources carrying ANY of these tags
   includeLanguages?: string[]; // keep only sources carrying AT LEAST ONE of these audio languages
   excludeLanguages?: string[]; // drop sources carrying ANY of these audio languages
+  minSourceNodes?: number; // torrents: require this many distinct contributing nodes (anti-fake-infohash; 1 = off)
   sort?: string[]; // ordered keys: cached | resolution | seeders | size
   maxResults?: number; // cap the total returned (0/undefined = unlimited)
   maxPerResolution?: number; // cap how many of each resolution (0/undefined = unlimited)
@@ -457,6 +459,9 @@ function applyFilters(streams: CorpusStream[], opts: StreamFilterOptions): Corpu
     const langs = s.languages ?? [];
     if (opts.excludeLanguages && opts.excludeLanguages.length > 0 && langs.some((l) => opts.excludeLanguages!.includes(l))) return false;
     if (opts.includeLanguages && opts.includeLanguages.length > 0 && langs.length > 0 && !langs.some((l) => opts.includeLanguages!.includes(l))) return false;
+    // Anti-fake-infohash: a torrent association from only 1 node is low-confidence. Opt-in (default 1 = off)
+    // so a young corpus is never gutted; scoped to torrents (http has its own node gate, nzb resolves on-device).
+    if (opts.minSourceNodes && opts.minSourceNodes > 1 && kindOf(s) === "torrent" && (s.sources ?? 1) < opts.minSourceNodes) return false;
     return true;
   });
 }
