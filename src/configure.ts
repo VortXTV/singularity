@@ -8,6 +8,7 @@ import {
   DEBRID_SERVICES, USENET_SERVICES, RESOLUTIONS, SORT_KEYS,
   FORMAT_PRESETS, HISTORY_SOURCES, DEFAULT_CONFIG,
 } from "./config.ts";
+import { FORMAT_TEMPLATE_VARS } from "./corpus.ts";
 
 // Curated user-facing tag choices (visual / audio / encode; CAM/junk is handled by the Exclude-CAM toggle).
 const TAG_CHOICES = ["hdr", "dv", "hdr10plus", "hlg", "10bit", "imax", "remux", "atmos", "truehd", "dtshd", "dts", "ddp", "flac", "av1", "hevc", "avc", "xvid"];
@@ -157,6 +158,10 @@ export function renderConfigurePage(baseUrl: string): string {
     <div class="field"><label class="lbl" for="format">Result format</label><select id="format">${formatOpts}</select></div>
     <div class="field"><label class="toggle" style="margin-top:24px"><input id="proxyEnabled" type="checkbox"> Route streams through a proxy</label></div>
   </div>
+  <div class="field" style="margin-top:14px"><label class="lbl" for="formatTemplate">Custom template (used when format = custom)</label>
+    <input id="formatTemplate" type="text" placeholder="{quality} • {size} • {tags}\\n⚡ {cached} • 🌱 {seeders} • {source}">
+    <p class="hint" style="margin-top:6px">Variables: ${FORMAT_TEMPLATE_VARS.map((v) => `<code>{${v}}</code>`).join(" ")} - use <code>\\n</code> for a new line. Empty values are trimmed.</p>
+  </div>
   <div class="row" style="margin-top:14px">
     <div class="field"><label class="lbl" for="maxResults">Max results total (0 = unlimited)</label><input id="maxResults" type="number" min="0" max="200" value="0"></div>
     <div class="field"><label class="lbl" for="maxPerResolution">Max per resolution (0 = unlimited)</label><input id="maxPerResolution" type="number" min="0" max="50" value="0"></div>
@@ -207,6 +212,7 @@ export function renderConfigurePage(baseUrl: string): string {
       },
       sort: vals('sort'),
       format: document.getElementById('format').value,
+      formatTemplate: document.getElementById('formatTemplate').value.slice(0,240),
       proxyEnabled: document.getElementById('proxyEnabled').checked,
       ratings: { enabled: document.getElementById('ratingsEnabled').checked, instance: document.getElementById('ratingsInstance').value },
       recommendations: { enabled: document.getElementById('recsEnabled').checked, historySource: document.getElementById('historySource').value },

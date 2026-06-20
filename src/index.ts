@@ -243,6 +243,7 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         dedup: config.filters.dedup,
         sort: config.sort,
         format: config.format,
+        formatTemplate: config.formatTemplate,
       }
     : undefined;
   return json(buildStreamResponse(corpus, now, opts), 200, true);

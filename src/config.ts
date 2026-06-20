@@ -29,6 +29,7 @@ const MAX_SEEDERS = 10000;
 const MAX_REGEX = 256;
 const MAX_ADDONS = 50;
 const MAX_URL = 512;
+const MAX_FORMAT_TEMPLATE = 240;
 
 export interface SingularityFilters {
   resolutions: string[]; // allowed resolutions (empty = all)
@@ -53,6 +54,7 @@ export interface SingularityConfig {
   filters: SingularityFilters;
   sort: string[]; // ordered sort keys, strongest first
   format: string; // result-line format preset id
+  formatTemplate: string; // when format === "custom": a {variable} template for the stream line
   proxyEnabled: boolean; // route streams through a proxy (endpoint/creds are app-side)
   ratings: { enabled: boolean; instance: string }; // ratings + quality badges on poster art
   recommendations: { enabled: boolean; historySource: string }; // personalized catalogs from your taste profile
@@ -65,6 +67,7 @@ export const DEFAULT_CONFIG: SingularityConfig = {
   filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], includeLanguages: [], excludeLanguages: [], minSourceNodes: 1, maxResults: 0, maxPerResolution: 0, dedup: false },
   sort: ["cached", "resolution", "seeders"],
   format: "standard",
+  formatTemplate: "",
   proxyEnabled: false,
   ratings: { enabled: false, instance: "" },
   recommendations: { enabled: false, historySource: "library" },
@@ -125,6 +128,7 @@ export function validateConfig(raw: unknown): SingularityConfig {
     },
     sort: pickKnown(r.sort, SORT_KEYS),
     format,
+    formatTemplate: str(r.formatTemplate, MAX_FORMAT_TEMPLATE),
     proxyEnabled: bool(r.proxyEnabled, false),
     ratings: { enabled: bool(rt.enabled, false), instance },
     recommendations: { enabled: bool(rc.enabled, false), historySource },

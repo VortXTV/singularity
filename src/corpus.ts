@@ -385,7 +385,54 @@ function humanSize(bytes: number | null): string {
   return gb >= 1 ? `${gb.toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`;
 }
 
-function streamTitle(s: CorpusStream, format = "standard"): string {
+// Whitelisted variables for the custom format template. Flat {name} placeholders only - a deliberately tiny,
+// safe engine (no nested props, no expressions, no code). Exported so the /configure page lists the same set.
+export const FORMAT_TEMPLATE_VARS = ["quality", "size", "tags", "languages", "seeders", "source", "cached", "sources", "kind", "badge"];
+const TEMPLATE_VAR_RE = /\{([a-z]+)\}/gi;
+const MAX_RENDERED = 400;
+
+/**
+ * Render a user custom format template into a stream line. Each known {variable} is substituted, unknown
+ * {tokens} are stripped, and a literal `\n` becomes a newline. Per line we then collapse a repeated separator
+ * left by an empty value (e.g. no seeders -> no orphan "• •") and trim dangling separators, drop empty lines,
+ * and cap the length. The template is the user's OWN config (length-capped at validate time) rendered into
+ * their OWN titles and emitted as plain text, so the surface is small; this stays a string transform.
+ */
+function renderTemplate(s: CorpusStream, template: string): string {
+  const kind = kindOf(s);
+  const vars: Record<string, string> = {
+    quality: s.quality || "",
+    size: humanSize(s.size),
+    tags: (s.tags ?? []).map((t) => t.toUpperCase()).join(" "),
+    languages: (s.languages ?? []).map((l) => l.toUpperCase()).join(" "),
+    seeders: s.seeders && s.seeders > 0 ? String(s.seeders) : "",
+    source: s.source || "",
+    cached: s.cachedOn.length ? s.cachedOn.map((x) => SERVICE_LABELS[x] || x).join(", ") : "",
+    sources: s.sources && s.sources > 1 ? String(s.sources) : "",
+    kind,
+    badge: kind === "http" ? "HTTP" : kind === "nzb" ? "NZB" : "",
+  };
+  const out = template
+    .replace(/\\n/g, "\n")
+    .replace(TEMPLATE_VAR_RE, (_m, name: string) => vars[name.toLowerCase()] ?? "")
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/([•|\-·])(?:\s*\1)+/g, "$1") // collapse a separator repeated by empty vars ("• •" -> "•")
+        .replace(/[ \t]+/g, " ")
+        .replace(/^[\s•|\-·,]+|[\s•|\-·,]+$/g, "")
+        .trim(),
+    )
+    .filter((line) => line.length > 0)
+    .join("\n");
+  return out.slice(0, MAX_RENDERED);
+}
+
+function streamTitle(s: CorpusStream, format = "standard", template?: string): string {
+  if (format === "custom" && template && template.trim()) {
+    const rendered = renderTemplate(s, template);
+    if (rendered) return rendered; // empty render (all vars blank) -> fall through to the standard line
+  }
   const kind = kindOf(s);
   const badge = kind === "http" ? "HTTP " : kind === "nzb" ? "NZB " : "";
   const q = s.quality || "SD";
@@ -403,7 +450,7 @@ function streamTitle(s: CorpusStream, format = "standard"): string {
     if (s.source) lines.push(s.source);
     return lines.join("\n");
   }
-  // "standard" (and "custom" fallback until a full template engine lands)
+  // "standard" (also the fallback when a custom template is empty or renders blank)
   const head = `${badge}${[q, sz, tagStr].filter(Boolean).join(" • ")}`;
   const meta = [cached, seed].filter(Boolean).join("  ");
   const src = s.source ? `\n${s.source}` : "";
@@ -428,6 +475,7 @@ export interface StreamFilterOptions {
   maxResults?: number; // cap the total returned (0/undefined = unlimited)
   maxPerResolution?: number; // cap how many of each resolution (0/undefined = unlimited)
   format?: string; // result-line preset: standard | detailed | minimal | compact | custom
+  formatTemplate?: string; // when format === "custom": a {variable} template for the stream line
   dedup?: boolean; // collapse same-release torrents/nzb (kind-aware; http fallbacks are never collapsed)
 }
 
@@ -537,7 +585,7 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
     const kind = kindOf(s);
     const out: StremioStream = {
       name: "Singularity",
-      title: streamTitle(s, opts?.format),
+      title: streamTitle(s, opts?.format, opts?.formatTemplate),
       behaviorHints: { bingeGroup: `singularity-${kind}-${s.quality || "sd"}` },
     };
     if (kind === "http" && s.url) {

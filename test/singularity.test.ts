@@ -402,6 +402,26 @@ console.log("format presets");
   ok((t("detailed").match(/\n/g) || []).length >= (t("standard").match(/\n/g) || []).length, "detailed has at least as many lines as standard");
 }
 
+// --- custom format template: {variable} substitution, empty-var cleanup, unknown-token stripping ---
+console.log("custom format template");
+{
+  const now = 9_100_000_000_000;
+  const full = { kind: "torrent", infoHash: "a".repeat(40), quality: "2160p", size: 2e10, source: "GoodGroup", seeders: 80, cachedOn: ["torbox"], trusted: true, lastVerified: now - 1000, tags: ["dv", "atmos"], languages: ["en", "ja"] };
+  const render = (s, tpl) => buildStreamResponse([s], now, { format: "custom", formatTemplate: tpl }).streams[0].title;
+  ok(render(full, "{quality} | {size}") === "2160p | 20.00 GB", "substitutes known variables (decimal-GB size)");
+  ok(render(full, "{quality} {tags} {languages}") === "2160p DV ATMOS EN JA", "tags + languages render uppercased");
+  ok(render(full, "{quality} • {cached}").includes("TB"), "cached renders the service label");
+  ok(render(full, "L1: {quality}\\nL2: {source}") === "L1: 2160p\nL2: GoodGroup", "\\n becomes a newline (multi-line template)");
+  ok(render(full, "{quality} {bogus} {source}") === "2160p GoodGroup", "unknown {tokens} are stripped");
+  // empty-variable cleanup: an empty {cached} between bullets shouldn't leave an orphan separator
+  // (the stream keeps seeders so it survives the dead-swarm filter).
+  const lean = { kind: "torrent", infoHash: "b".repeat(40), quality: "1080p", size: null, source: "X", seeders: 5, cachedOn: [], trusted: true, lastVerified: now - 1000, tags: [] };
+  ok(render(lean, "{quality} • {seeders} • {cached} • {source}") === "1080p • 5 • X", "an empty var collapses the repeated separator");
+  // a template that renders entirely blank falls back to the standard line (never an empty title)
+  const blank = buildStreamResponse([lean], now, { format: "custom", formatTemplate: "{cached}" }).streams[0].title;
+  ok(blank.length > 0 && /1080p/.test(blank), "an all-empty render falls back to the standard line");
+}
+
 // --- smart dedup (collapse same-release torrents/nzb; never collapse distinct http fallbacks) ---
 console.log("smart dedup");
 {
