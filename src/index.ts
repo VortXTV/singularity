@@ -28,6 +28,8 @@ import {
   buildManifest,
   buildStreamResponse,
   parseMetaId,
+  metaKey,
+  seasonIdOf,
   assembleSyncDelta,
   buildLeaderboard,
   reportsExceedThreshold,
@@ -140,15 +142,21 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
   const id = idWithExt.replace(/\.json$/, "");
   const meta = parseMetaId(id);
   if (!meta.imdb || (type !== "movie" && type !== "series")) return json({ streams: [] }, 200, true);
-  const metaId = meta.season != null && meta.episode != null ? `${meta.imdb}:${meta.season}:${meta.episode}` : meta.imdb;
+  const metaId = metaKey(meta) as string;
+  // For an episode request, also pull SEASON PACKS (a whole-season torrent stored under "tt:S") and mark them.
+  const seasonId = seasonIdOf(id);
   const now = Date.now();
 
   // The corpus serves three kinds for a title: torrents, direct/HTTP public streams, and NZB/Usenet.
   // (LIMITs keep the cache IN-clause below D1's 100 bound-parameter cap: 50 torrent + 30 nzb hashes = 80.)
   const torrents = (
-    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, tags, languages, sources, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
-      .bind(metaId)
-      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; added_at: number }>()
+    seasonId
+      ? await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, added_at FROM torrents WHERE meta_id IN (?, ?) LIMIT 50")
+          .bind(metaId, seasonId)
+          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; added_at: number }>()
+      : await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
+          .bind(metaId)
+          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; added_at: number }>()
   ).results ?? [];
   const httpRows = (
     // Only HTTP URLs confirmed by >= MIN_CONFIRMATIONS distinct nodes are surfaced (gated like the cache).
@@ -216,6 +224,7 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
       tags: r.tags ? r.tags.split(",") : [],
       languages: r.languages ? r.languages.split(",") : [],
       sources: r.sources ?? 1,
+      pack: seasonId != null && r.meta_id === seasonId, // a season-pack torrent surfaced for this episode
     });
   }
   for (const r of httpRows) {
@@ -369,7 +378,9 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     // a relay cannot swap which title a source claims to serve without breaking the sig.
     const meta = parseMetaId(typeof raw.metaId === "string" ? raw.metaId : "");
     if (!meta.imdb) continue; // a fact must say which title it serves
-    const metaId = meta.season != null && meta.episode != null ? `${meta.imdb}:${meta.season}:${meta.episode}` : meta.imdb;
+    // Canonical key: episode "tt:S:E", SEASON PACK "tt:S", or movie/show "tt". The season variant lets a
+    // whole-season torrent be stored once and surfaced for every episode of that season (handleStream).
+    const metaId = metaKey(meta) as string;
     const kind = typeof raw.kind === "string" ? raw.kind : "torrent";
 
     if (kind === "http") {

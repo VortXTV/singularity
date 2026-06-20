@@ -108,6 +108,11 @@ Each kind renders to the right Stremio stream shape (`src/corpus.ts` `buildStrea
 `url`, an NZB -> an on-device-resolve marker (no url, no token). The facts-not-tokens invariant holds across
 all three.
 
+**Season packs.** A whole-season torrent is stored once under a season key (`tt123:5`) instead of being
+duplicated per episode. On an episode request (`tt123:5:3`) the corpus surfaces both the per-episode sources
+and the matching season pack, flagged with a 📦 marker (and a `{pack}` format variable); the client picks the
+file. `metaKey` / `seasonIdOf` in `src/corpus.ts`.
+
 ## Test
 
 ```bash

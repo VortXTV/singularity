@@ -21,6 +21,8 @@ import {
   buildManifest,
   buildStreamResponse,
   parseMetaId,
+  metaKey,
+  seasonIdOf,
   reportsExceedThreshold,
   reConfirmationVindicates,
   CACHE_TTL_MS,
@@ -196,6 +198,18 @@ console.log("parseMetaId bounds");
 {
   ok(parseMetaId("tt" + "1".repeat(50)).imdb === null, "rejects an absurdly long imdb id");
   ok(parseMetaId("tt0111161").imdb === "tt0111161", "still accepts a normal imdb id");
+}
+
+// --- season-pack keys: metaKey (storage) + seasonIdOf (read-time pack lookup) ---
+console.log("metaKey + seasonIdOf (season packs)");
+{
+  ok(metaKey(parseMetaId("tt0903747:5:3")) === "tt0903747:5:3", "episode -> tt:S:E key");
+  ok(metaKey(parseMetaId("tt0903747:5")) === "tt0903747:5", "SEASON PACK -> tt:S key (not collapsed to the show id)");
+  ok(metaKey(parseMetaId("tt0903747")) === "tt0903747", "movie/show -> tt key");
+  ok(metaKey(parseMetaId("garbage")) === null, "no imdb -> null key");
+  ok(seasonIdOf("tt0903747:5:3") === "tt0903747:5", "episode -> its season-pack key");
+  ok(seasonIdOf("tt0903747") === null, "a movie has no season-pack key");
+  ok(seasonIdOf("tt0903747:5") === null, "a season id itself has no further season key");
 }
 
 // --- HTTP/direct public-stream facts (the corpus serves these to everyone) ---
@@ -420,6 +434,11 @@ console.log("custom format template");
   // a template that renders entirely blank falls back to the standard line (never an empty title)
   const blank = buildStreamResponse([lean], now, { format: "custom", formatTemplate: "{cached}" }).streams[0].title;
   ok(blank.length > 0 && /1080p/.test(blank), "an all-empty render falls back to the standard line");
+  // season-pack marker: a pack:true torrent shows the pack indicator + the {pack} template var
+  const packStream = { ...full, infoHash: "c".repeat(40), pack: true };
+  ok(/📦/.test(buildStreamResponse([packStream], now, { format: "standard" }).streams[0].title), "a season pack shows the 📦 indicator in the standard line");
+  ok(render(packStream, "{pack} {quality}") === "PACK 2160p", "{pack} template var renders PACK for a season pack");
+  ok(render(full, "{pack}{quality}") === "2160p", "{pack} is empty for a non-pack (no orphan text)");
 }
 
 // --- smart dedup (collapse same-release torrents/nzb; never collapse distinct http fallbacks) ---

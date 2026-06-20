@@ -167,6 +167,22 @@ console.log("anti-fake-infohash: minSourceNodes gates single-node associations")
   ok(streams.some((s) => s.infoHash === FAKE), "after a 2nd distinct node vouches, it passes the minSourceNodes=2 gate");
 }
 
+console.log("season packs: a tt:S torrent surfaces for an episode tt:S:E");
+{
+  const SHOW = "tt0903747"; // Breaking Bad
+  const PACK = "5".repeat(40);
+  const SEASON = `${SHOW}:5`;     // whole-season torrent association
+  const EP = `${SHOW}:5:3`;       // a specific episode request
+  await contribute(await newNode(), [{ metaId: SEASON, infoHash: PACK, quality: "1080p", source: "PackGroup", seeders: 40 }]);
+  const streams = (await get(`/stream/series/${EP}.json`)).json?.streams || [];
+  const row = streams.find((s) => s.infoHash === PACK);
+  ok(!!row, "a season-pack torrent (stored under tt:S) surfaces for an episode request tt:S:E");
+  ok(row && /📦/.test(row.title), "the surfaced season pack is marked with the pack indicator");
+  // a season pack must NOT leak into a DIFFERENT season's episode
+  const otherSeason = (await get(`/stream/series/${SHOW}:4:3.json`)).json?.streams || [];
+  ok(!otherSeason.some((s) => s.infoHash === PACK), "the S5 pack does NOT surface for an S4 episode");
+}
+
 console.log("federation delta-sync");
 {
   const s = await get("/hive/sync?since=0&limit=100");

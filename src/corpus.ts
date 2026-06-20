@@ -332,6 +332,24 @@ export function parseMetaId(id: string): ParsedMetaId {
   };
 }
 
+/**
+ * Canonical corpus storage key for a parsed id: a specific episode "tt:S:E", a SEASON PACK "tt:S" (season
+ * present, no episode), or a movie/show "tt". The episode-vs-season distinction is what lets a whole-season
+ * torrent be stored once and surfaced for every episode of that season (see seasonIdOf).
+ */
+export function metaKey(p: ParsedMetaId): string | null {
+  if (!p.imdb) return null;
+  if (p.season != null && p.episode != null) return `${p.imdb}:${p.season}:${p.episode}`;
+  if (p.season != null) return `${p.imdb}:${p.season}`;
+  return p.imdb;
+}
+
+/** For an EPISODE id "tt:S:E", the season-pack key "tt:S" that could also serve it; null otherwise. */
+export function seasonIdOf(metaId: string): string | null {
+  const p = parseMetaId(metaId);
+  return p.imdb && p.season != null && p.episode != null ? `${p.imdb}:${p.season}` : null;
+}
+
 export type SourceKind = "torrent" | "http" | "nzb";
 
 // A corpus row already joined with its cache + health + trust facts, ready to render. A row is one of
@@ -352,6 +370,7 @@ export interface CorpusStream {
   tags?: string[]; // normalized release tags (hdr/dv/atmos/hevc/cam/...)
   languages?: string[]; // audio-language slugs (en/es/fr/.../multi/dual)
   sources?: number; // torrent: distinct non-barred nodes that vouch for this (infoHash->title) association
+  pack?: boolean; // torrent: a SEASON PACK surfaced for an episode request (the client picks the file)
 }
 
 // A Stremio stream object. A torrent carries `infoHash` (the client mints the magnet / resolves debrid
@@ -387,7 +406,7 @@ function humanSize(bytes: number | null): string {
 
 // Whitelisted variables for the custom format template. Flat {name} placeholders only - a deliberately tiny,
 // safe engine (no nested props, no expressions, no code). Exported so the /configure page lists the same set.
-export const FORMAT_TEMPLATE_VARS = ["quality", "size", "tags", "languages", "seeders", "source", "cached", "sources", "kind", "badge"];
+export const FORMAT_TEMPLATE_VARS = ["quality", "size", "tags", "languages", "seeders", "source", "cached", "sources", "kind", "badge", "pack"];
 const TEMPLATE_VAR_RE = /\{([a-z]+)\}/gi;
 const MAX_RENDERED = 400;
 
@@ -411,6 +430,7 @@ function renderTemplate(s: CorpusStream, template: string): string {
     sources: s.sources && s.sources > 1 ? String(s.sources) : "",
     kind,
     badge: kind === "http" ? "HTTP" : kind === "nzb" ? "NZB" : "",
+    pack: s.pack ? "PACK" : "",
   };
   const out = template
     .replace(/\\n/g, "\n")
@@ -434,7 +454,7 @@ function streamTitle(s: CorpusStream, format = "standard", template?: string): s
     if (rendered) return rendered; // empty render (all vars blank) -> fall through to the standard line
   }
   const kind = kindOf(s);
-  const badge = kind === "http" ? "HTTP " : kind === "nzb" ? "NZB " : "";
+  const badge = (s.pack ? "📦 " : "") + (kind === "http" ? "HTTP " : kind === "nzb" ? "NZB " : "");
   const q = s.quality || "SD";
   const sz = humanSize(s.size);
   const tagStr = (s.tags ?? []).map((t) => t.toUpperCase()).join(" ");
