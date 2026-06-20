@@ -26,6 +26,8 @@ import {
   seasonIdOf,
   sanitizeEpisodeMap,
   episodeFileIdx,
+  parseCatalogSearch,
+  corpusPresentImdbs,
   reportsExceedThreshold,
   reConfirmationVindicates,
   CACHE_TTL_MS,
@@ -138,6 +140,25 @@ console.log("buildManifest");
   ok(Array.isArray(m.resources) && m.resources.includes("stream"), "manifest declares the stream resource");
   ok(m.types.includes("movie") && m.types.includes("series"), "manifest supports movie + series");
   ok(Array.isArray(m.idPrefixes) && m.idPrefixes.includes("tt"), "manifest declares the tt id prefix");
+  const trend = (m.catalogs || []).find((c) => /trending/i.test(c.id));
+  ok(trend && Array.isArray(trend.extra) && trend.extra.some((e) => e.name === "search"), "the trending catalog declares the search extra");
+}
+
+// --- corpus-scoped catalog search: parse the extra + intersect candidates with corpus presence ---
+console.log("parseCatalogSearch + corpusPresentImdbs");
+{
+  ok(parseCatalogSearch("singularity.trending/search=breaking%20bad.json") === "breaking bad", "extracts + url-decodes the search query");
+  ok(parseCatalogSearch("singularity.trending/search=the+wire.json") === "the wire", "+ decodes to space");
+  ok(parseCatalogSearch("singularity.trending.json") === null, "no search extra -> null (plain trending)");
+  ok(parseCatalogSearch("id/search=a.json") === null, "a 1-char query is rejected (too short)");
+  ok(parseCatalogSearch("id/search=" + "x".repeat(200) + ".json") === null, "an over-long query is rejected");
+  // corpusPresentImdbs: a movie id is present directly; a series is present via its episode/season prefix
+  const corpusIds = ["tt0903747:5:3", "tt0111161", "tt0068646:1:1"];
+  const cands = ["tt0903747", "tt0111161", "tt9999999", "tt0068646"];
+  const present = corpusPresentImdbs(corpusIds, cands);
+  ok(present.includes("tt0903747") && present.includes("tt0111161") && present.includes("tt0068646"), "keeps candidates the corpus has (movie id or series prefix)");
+  ok(!present.includes("tt9999999"), "drops a candidate with no corpus source");
+  ok(JSON.stringify(present) === JSON.stringify(["tt0903747", "tt0111161", "tt0068646"]), "preserves candidate (relevance) order");
 }
 
 // --- meta id parsing ---

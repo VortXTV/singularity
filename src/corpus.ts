@@ -329,10 +329,33 @@ export interface Manifest {
 // The always-on discovery catalog: the titles the hive-mind currently has the most/freshest sources for.
 // Unique to Singularity (derived from the corpus itself, no user history or key needed). Enriched on read
 // via public Cinemeta. Stremio shows one catalog per type.
+// `search` extra makes the catalog appear in Stremio's global search: a query is corpus-SCOPED, i.e. it
+// returns only titles the corpus actually has sources for (resolved via Cinemeta, then cross-referenced).
 export const TRENDING_CATALOGS = [
-  { type: "movie", id: "singularity.trending", name: "Singularity: Trending" },
-  { type: "series", id: "singularity.trending", name: "Singularity: Trending" },
+  { type: "movie", id: "singularity.trending", name: "Singularity: Trending", extra: [{ name: "search", isRequired: false }] },
+  { type: "series", id: "singularity.trending", name: "Singularity: Trending", extra: [{ name: "search", isRequired: false }] },
 ];
+
+/** Extract the `search=<query>` extra from a catalog id path segment (e.g. "id/search=breaking%20bad.json"); null if absent or out of bounds. */
+export function parseCatalogSearch(idRaw: string): string | null {
+  const m = (idRaw || "").match(/(?:^|\/|&)search=([^/&]+?)(?:\.json)?(?:&|$)/i);
+  if (!m) return null;
+  let q = "";
+  try {
+    q = decodeURIComponent(m[1].replace(/\+/g, " ")).trim();
+  } catch {
+    return null;
+  }
+  return q.length >= 2 && q.length <= 100 ? q : null;
+}
+
+/** Of `candidates` (imdb ids from a metadata search), the ones the corpus has a source for - reducing each
+ *  matched corpus meta_id to its imdb (movie id or "tt:S:E" series prefix). Preserves candidate (relevance) order. */
+export function corpusPresentImdbs(corpusMetaIds: string[], candidates: string[]): string[] {
+  const present = new Set<string>();
+  for (const m of corpusMetaIds) present.add(m.includes(":") ? m.slice(0, m.indexOf(":")) : m);
+  return candidates.filter((c) => present.has(c));
+}
 
 export function buildManifest(version = "0.1.0"): Manifest {
   return {

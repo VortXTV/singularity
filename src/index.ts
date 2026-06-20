@@ -31,6 +31,8 @@ import {
   metaKey,
   seasonIdOf,
   episodeFileIdx,
+  parseCatalogSearch,
+  corpusPresentImdbs,
   assembleSyncDelta,
   ingestSyncDelta,
   type IngestedFacts,
@@ -536,12 +538,48 @@ async function cinemetaMeta(type: string, imdb: string): Promise<{ id: string; t
   }
 }
 
+// Cinemeta's searchable catalog -> candidate titles for a query (official trusted metadata host, like
+// cinemetaMeta). Returns shaped {id,name,poster}; never throws (search degrades to empty on any failure).
+async function cinemetaSearch(type: string, query: string): Promise<Array<{ id: string; type: string; name: string; poster?: string }>> {
+  try {
+    const r = await fetch(`https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(query)}.json`, { cf: { cacheTtl: 600, cacheEverything: true } } as RequestInit);
+    if (!r.ok) return [];
+    const j = (await r.json()) as { metas?: Array<{ id?: unknown; name?: unknown; poster?: unknown }> };
+    return (Array.isArray(j?.metas) ? j.metas : [])
+      .filter((m) => m && typeof m.id === "string" && /^tt\d+$/.test(m.id))
+      .slice(0, 40)
+      .map((m) => ({ id: m.id as string, type, name: typeof m.name === "string" ? m.name : (m.id as string), poster: typeof m.poster === "string" ? m.poster : undefined }));
+  } catch {
+    return [];
+  }
+}
+
+// Corpus-SCOPED search: resolve the query to candidate titles via Cinemeta, then keep only the ones the
+// corpus actually has torrent sources for (consistent with the torrent-derived Trending catalog). One
+// metadata fetch + one parameterized corpus query; preserves Cinemeta's relevance order.
+async function handleCatalogSearch(env: Env, type: string, query: string): Promise<Response> {
+  const candidates = await cinemetaSearch(type, query);
+  const ids = candidates.map((c) => c.id).slice(0, 40);
+  if (ids.length === 0) return json({ metas: [] }, 200, true);
+  const ph = ids.map(() => "?").join(",");
+  const rows = await env.DB.prepare(
+    `SELECT DISTINCT meta_id FROM torrents WHERE meta_id IN (${ph}) OR substr(meta_id, 1, instr(meta_id, ':') - 1) IN (${ph})`,
+  )
+    .bind(...ids, ...ids)
+    .all<{ meta_id: string }>();
+  const present = new Set(corpusPresentImdbs((rows.results ?? []).map((r) => r.meta_id), ids));
+  return json({ metas: candidates.filter((c) => present.has(c.id)) }, 200, true);
+}
+
 // Catalogs. The always-on "Singularity: Trending" catalog is derived from the corpus itself (titles with
 // the most/freshest sources) - no user history or key needed; recommendation catalogs are a later phase
 // (respond empty so a client never errors). The id may carry a .json suffix and Stremio "extra" segments.
 async function handleCatalog(env: Env, type: string, idRaw: string): Promise<Response> {
   const id = idRaw.split("/")[0].replace(/\.json$/, "");
   if (id !== "singularity.trending" || (type !== "movie" && type !== "series")) return json({ metas: [] }, 200, true);
+  // Searchable catalog: a `search=` extra makes this a corpus-scoped search instead of the trending list.
+  const query = parseCatalogSearch(idRaw);
+  if (query) return handleCatalogSearch(env, type, query);
   // Top titles by source count. Movies key on the bare imdb id; series collapse the episode meta_id to its
   // imdb prefix so a whole show ranks once.
   const sql =

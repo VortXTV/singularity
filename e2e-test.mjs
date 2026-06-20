@@ -53,6 +53,9 @@ console.log("health + manifest");
   ok(m.json?.resources?.includes("catalog") && (m.json?.catalogs || []).some((c) => /trending/i.test(c.id)), "manifest declares the always-on Trending catalog");
   const cat = await get("/catalog/movie/singularity.trending.json");
   ok(cat.status === 200 && Array.isArray(cat.json?.metas), "GET /catalog/movie/singularity.trending returns a metas array");
+  ok((m.json?.catalogs || []).some((c) => (c.extra || []).some((e) => e.name === "search")), "the trending catalog declares the search extra (corpus-scoped search)");
+  const search = await get("/catalog/movie/singularity.trending/search=the%20matrix.json");
+  ok(search.status === 200 && Array.isArray(search.json?.metas), "catalog search responds gracefully with a metas array (corpus-scoped)");
 }
 
 console.log("empty corpus");
