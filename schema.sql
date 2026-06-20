@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS torrents (
   tags      TEXT,                               -- comma-joined normalized release tags (hdr,dv,atmos,hevc,cam,...)
   languages TEXT,                               -- comma-joined audio-language slugs (en,es,fr,...,multi,dual)
   sources   INTEGER NOT NULL DEFAULT 1,         -- distinct non-barred nodes vouching for this association (anti-fake-infohash)
+  episodes  TEXT,                               -- season pack only: JSON episode-number -> file-index map
   added_at  INTEGER NOT NULL,                   -- last-seen (touched on re-contribution)
   PRIMARY KEY (info_hash, meta_id)
 );

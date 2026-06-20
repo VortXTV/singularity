@@ -173,11 +173,13 @@ console.log("season packs: a tt:S torrent surfaces for an episode tt:S:E");
   const PACK = "5".repeat(40);
   const SEASON = `${SHOW}:5`;     // whole-season torrent association
   const EP = `${SHOW}:5:3`;       // a specific episode request
-  await contribute(await newNode(), [{ metaId: SEASON, infoHash: PACK, quality: "1080p", source: "PackGroup", seeders: 40 }]);
+  // contribute the pack WITH an episode -> file-index map so the client gets the exact file for E3
+  await contribute(await newNode(), [{ metaId: SEASON, infoHash: PACK, quality: "1080p", source: "PackGroup", seeders: 40, episodes: { "1": 0, "3": 2 } }]);
   const streams = (await get(`/stream/series/${EP}.json`)).json?.streams || [];
   const row = streams.find((s) => s.infoHash === PACK);
   ok(!!row, "a season-pack torrent (stored under tt:S) surfaces for an episode request tt:S:E");
   ok(row && /📦/.test(row.title), "the surfaced season pack is marked with the pack indicator");
+  ok(row && row.fileIdx === 2, "the pack resolves the EXACT file index for the requested episode (E3 -> file 2)");
   // a season pack must NOT leak into a DIFFERENT season's episode
   const otherSeason = (await get(`/stream/series/${SHOW}:4:3.json`)).json?.streams || [];
   ok(!otherSeason.some((s) => s.infoHash === PACK), "the S5 pack does NOT surface for an S4 episode");

@@ -33,6 +33,7 @@ export interface CleanFact {
   fileIdx: number | null;
   tags: string[];
   languages: string[];
+  episodes: Record<string, number>; // season pack only: episode-number -> file-index (empty for a single file)
 }
 
 const HEX40 = /^[a-f0-9]{40}$/;
@@ -132,6 +133,43 @@ export function sanitizeLanguages(v: unknown): string[] {
   return out;
 }
 
+const MAX_EPISODE_ENTRIES = 200; // a season pack's episode->fileIdx map; generous (anthologies/dailies) but bounded
+const EP_NUM_RE = /^[1-9][0-9]{0,3}$/; // episode number key 1..9999
+
+/**
+ * For a SEASON PACK, an untrusted episode-number -> file-index map (which file in the multi-file torrent is
+ * each episode). Keys must be a 1..9999 episode number, values a 0..9999 file index; anything else is dropped.
+ * Lets the corpus hand the client the exact file for the requested episode instead of a file picker.
+ */
+export function sanitizeEpisodeMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (n >= MAX_EPISODE_ENTRIES) break;
+    if (!EP_NUM_RE.test(k)) continue;
+    const idx = asInt(v);
+    if (idx == null || idx > 9999) continue;
+    out[k] = idx;
+    n++;
+  }
+  return out;
+}
+
+/** Resolve a requested episode's file index from a season pack's stored episode map (JSON), or null. */
+export function episodeFileIdx(episodesJson: string | null | undefined, episode: number | null): number | null {
+  if (!episodesJson || episode == null) return null;
+  let map: unknown;
+  try {
+    map = JSON.parse(episodesJson);
+  } catch {
+    return null;
+  }
+  if (!map || typeof map !== "object") return null;
+  const v = (map as Record<string, unknown>)[String(episode)];
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+}
+
 /**
  * Reduce an untrusted contribution to infohash-only facts, or null if it is not a usable fact.
  * Whitelist semantics: we read only the known fact fields and copy nothing else, so a token or
@@ -151,6 +189,7 @@ export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | 
     fileIdx: asInt(raw.fileIdx),
     tags: sanitizeTags(raw.tags),
     languages: sanitizeLanguages(raw.languages),
+    episodes: sanitizeEpisodeMap(raw.episodes),
   };
 }
 
@@ -632,7 +671,7 @@ const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v)
 export interface SyncDelta {
   since: number;
   cursor: number; // max timestamp seen; the node re-requests from here next
-  torrents: Array<{ infoHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; fileIdx: unknown; tags: unknown; languages: unknown; addedAt: unknown }>;
+  torrents: Array<{ infoHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; fileIdx: unknown; tags: unknown; languages: unknown; episodes: unknown; addedAt: unknown }>;
   cache: Array<{ infoHash: unknown; service: unknown; cached: unknown; confirmations: unknown; lastVerified: unknown }>;
   health: Array<{ infoHash: unknown; seeders: unknown; lastSeen: unknown }>;
   http: Array<{ url: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; languages: unknown; addedAt: unknown }>;
@@ -643,7 +682,7 @@ export function assembleSyncDelta(
   parts: { torrents: Row[]; cache: Row[]; health: Row[]; http: Row[]; nzb: Row[] },
   since: number,
 ): SyncDelta {
-  const torrents = parts.torrents.map((r) => ({ infoHash: r.info_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, fileIdx: r.file_idx, tags: r.tags, languages: r.languages, addedAt: r.added_at }));
+  const torrents = parts.torrents.map((r) => ({ infoHash: r.info_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, fileIdx: r.file_idx, tags: r.tags, languages: r.languages, episodes: r.episodes, addedAt: r.added_at }));
   const cache = parts.cache.map((r) => ({ infoHash: r.info_hash, service: r.service, cached: r.cached, confirmations: r.confirmations, lastVerified: r.last_verified }));
   const health = parts.health.map((r) => ({ infoHash: r.info_hash, seeders: r.seeders, lastSeen: r.last_seen }));
   const http = parts.http.map((r) => ({ url: r.url, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, languages: r.languages, addedAt: r.added_at }));

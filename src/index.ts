@@ -30,6 +30,7 @@ import {
   parseMetaId,
   metaKey,
   seasonIdOf,
+  episodeFileIdx,
   assembleSyncDelta,
   buildLeaderboard,
   reportsExceedThreshold,
@@ -151,12 +152,12 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
   // (LIMITs keep the cache IN-clause below D1's 100 bound-parameter cap: 50 torrent + 30 nzb hashes = 80.)
   const torrents = (
     seasonId
-      ? await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, added_at FROM torrents WHERE meta_id IN (?, ?) LIMIT 50")
+      ? await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, episodes, added_at FROM torrents WHERE meta_id IN (?, ?) LIMIT 50")
           .bind(metaId, seasonId)
-          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; added_at: number }>()
-      : await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
+          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; episodes: string | null; added_at: number }>()
+      : await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, episodes, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
           .bind(metaId)
-          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; added_at: number }>()
+          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; episodes: string | null; added_at: number }>()
   ).results ?? [];
   const httpRows = (
     // Only HTTP URLs confirmed by >= MIN_CONFIRMATIONS distinct nodes are surfaced (gated like the cache).
@@ -220,7 +221,9 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
       // node is surfaced, and the CACHE trust gate (3-node-or-own) is enforced above.
       trusted: true,
       lastVerified: Math.max(r.added_at, h?.last_seen ?? 0),
-      fileIdx: r.file_idx,
+      // For a season pack, resolve the requested episode's exact file index from the stored map (so the
+      // client opens the right file, no picker); fall back to the row's own file_idx.
+      fileIdx: (seasonId != null && r.meta_id === seasonId ? episodeFileIdx(r.episodes, meta.episode) : null) ?? r.file_idx,
       tags: r.tags ? r.tags.split(",") : [],
       languages: r.languages ? r.languages.split(",") : [],
       sources: r.sources ?? 1,
@@ -423,12 +426,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     if (!clean) continue;
     // 1) torrent association (infohash serves this title)
     await env.DB.prepare(
-      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, languages, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(info_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, torrents.quality), " +
         "size = COALESCE(excluded.size, torrents.size), source = COALESCE(excluded.source, torrents.source), " +
-        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), added_at = excluded.added_at",
+        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), episodes = COALESCE(excluded.episodes, torrents.episodes), added_at = excluded.added_at",
     )
-      .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, clean.languages.length ? clean.languages.join(",") : null, now)
+      .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, clean.languages.length ? clean.languages.join(",") : null, Object.keys(clean.episodes).length ? JSON.stringify(clean.episodes) : null, now)
       .run();
     // 1b) distinct-contributor count for this association (anti-fake-infohash signal -> torrents.sources)
     await recordTorrentConfirmation(env, clean.infoHash, metaId, nodeId, now);
@@ -552,7 +555,7 @@ async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
   type Row = Record<string, unknown>;
   const q = (sql: string) => env.DB.prepare(sql).bind(since, limit).all<Row>();
   const [torrents, cache, health, http, nzb] = await Promise.all([
-    q("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, added_at FROM torrents WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
+    q("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at FROM torrents WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
     q("SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE last_verified > ? ORDER BY last_verified ASC LIMIT ?"),
     q("SELECT info_hash, seeders, last_seen FROM health WHERE last_seen > ? ORDER BY last_seen ASC LIMIT ?"),
     q("SELECT url, meta_id, quality, size, source, tags, languages, added_at FROM http_streams WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),

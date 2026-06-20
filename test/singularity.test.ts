@@ -23,6 +23,8 @@ import {
   parseMetaId,
   metaKey,
   seasonIdOf,
+  sanitizeEpisodeMap,
+  episodeFileIdx,
   reportsExceedThreshold,
   reConfirmationVindicates,
   CACHE_TTL_MS,
@@ -210,6 +212,25 @@ console.log("metaKey + seasonIdOf (season packs)");
   ok(seasonIdOf("tt0903747:5:3") === "tt0903747:5", "episode -> its season-pack key");
   ok(seasonIdOf("tt0903747") === null, "a movie has no season-pack key");
   ok(seasonIdOf("tt0903747:5") === null, "a season id itself has no further season key");
+}
+
+// --- season-pack episode->fileIdx map: sanitize on ingest, resolve on read ---
+console.log("sanitizeEpisodeMap + episodeFileIdx");
+{
+  const clean = sanitizeEpisodeMap({ "1": 0, "2": 3, "3": "5", bad: 1, "0": 2, "4": -1, "5": 7.9 });
+  ok(clean["1"] === 0 && clean["2"] === 3, "keeps valid episode->fileIdx entries");
+  ok(!("3" in clean), "drops a non-number value");
+  ok(!("bad" in clean) && !("0" in clean), "drops a non-numeric key and episode 0");
+  ok(!("4" in clean), "drops a negative file index");
+  ok(clean["5"] === 7, "floors a fractional index");
+  ok(JSON.stringify(sanitizeEpisodeMap("nope")) === "{}" && JSON.stringify(sanitizeEpisodeMap([1, 2])) === "{}", "non-object/array -> empty map");
+  const c = sanitizeContribution({ infoHash: "a".repeat(40), episodes: { "3": 2 } });
+  ok(!!c && c.episodes["3"] === 2, "sanitizeContribution carries the episode map");
+  // episodeFileIdx resolves a requested episode from the stored JSON
+  const json = JSON.stringify({ "1": 0, "3": 2 });
+  ok(episodeFileIdx(json, 3) === 2, "resolves the file index for the requested episode");
+  ok(episodeFileIdx(json, 2) === null, "an episode not in the map -> null");
+  ok(episodeFileIdx(null, 3) === null && episodeFileIdx("{bad json", 3) === null && episodeFileIdx(json, null) === null, "null/garbage/no-episode -> null");
 }
 
 // --- HTTP/direct public-stream facts (the corpus serves these to everyone) ---

@@ -110,8 +110,10 @@ all three.
 
 **Season packs.** A whole-season torrent is stored once under a season key (`tt123:5`) instead of being
 duplicated per episode. On an episode request (`tt123:5:3`) the corpus surfaces both the per-episode sources
-and the matching season pack, flagged with a 📦 marker (and a `{pack}` format variable); the client picks the
-file. `metaKey` / `seasonIdOf` in `src/corpus.ts`.
+and the matching season pack, flagged with a 📦 marker (and a `{pack}` format variable). A pack can carry an
+episode-number -> file-index map (`torrents.episodes`), so the corpus hands the client the **exact file** for
+the requested episode (no picker); without one it falls back to the stored `fileIdx`. `metaKey` / `seasonIdOf`
+/ `episodeFileIdx` in `src/corpus.ts`.
 
 ## Test
 
