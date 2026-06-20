@@ -230,6 +230,7 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         maxResults: config.filters.maxResults,
         maxPerResolution: config.filters.maxPerResolution,
         sort: config.sort,
+        format: config.format,
       }
     : undefined;
   return json(buildStreamResponse(corpus, now, opts), 200, true);

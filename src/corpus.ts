@@ -292,14 +292,27 @@ function humanSize(bytes: number | null): string {
   return gb >= 1 ? `${gb.toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`;
 }
 
-function streamTitle(s: CorpusStream): string {
+function streamTitle(s: CorpusStream, format = "standard"): string {
   const kind = kindOf(s);
   const badge = kind === "http" ? "HTTP " : kind === "nzb" ? "NZB " : "";
-  const head = `${badge}${[s.quality || "SD", humanSize(s.size), (s.tags ?? []).map((t) => t.toUpperCase()).join(" ")].filter(Boolean).join(" • ")}`;
-  const tags: string[] = [];
-  if (s.cachedOn.length) tags.push(`⚡ Cached: ${s.cachedOn.map((x) => SERVICE_LABELS[x] || x).join(", ")}`);
-  if (s.seeders && s.seeders > 0) tags.push(`🌱 ${s.seeders}`);
-  const meta = tags.join("  ");
+  const q = s.quality || "SD";
+  const sz = humanSize(s.size);
+  const tagStr = (s.tags ?? []).map((t) => t.toUpperCase()).join(" ");
+  const cached = s.cachedOn.length ? `⚡ ${s.cachedOn.map((x) => SERVICE_LABELS[x] || x).join(", ")}` : "";
+  const seed = s.seeders && s.seeders > 0 ? `🌱 ${s.seeders}` : "";
+
+  if (format === "minimal") return `${badge}${q}${s.cachedOn.length ? " ⚡" : ""}`;
+  if (format === "compact") return `${badge}${[q, sz, tagStr, cached, seed, s.source].filter(Boolean).join(" • ")}`;
+  if (format === "detailed") {
+    const lines = [`${badge}${[q, sz, tagStr].filter(Boolean).join(" • ")}`];
+    if (cached) lines.push(cached);
+    if (seed) lines.push(seed);
+    if (s.source) lines.push(s.source);
+    return lines.join("\n");
+  }
+  // "standard" (and "custom" fallback until a full template engine lands)
+  const head = `${badge}${[q, sz, tagStr].filter(Boolean).join(" • ")}`;
+  const meta = [cached, seed].filter(Boolean).join("  ");
   const src = s.source ? `\n${s.source}` : "";
   return meta ? `${head}\n${meta}${src}` : `${head}${src}`;
 }
@@ -318,6 +331,7 @@ export interface StreamFilterOptions {
   sort?: string[]; // ordered keys: cached | resolution | seeders | size
   maxResults?: number; // cap the total returned (0/undefined = unlimited)
   maxPerResolution?: number; // cap how many of each resolution (0/undefined = unlimited)
+  format?: string; // result-line preset: standard | detailed | minimal | compact | custom
 }
 
 const RES_RANK: Record<string, number> = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1, SD: 0 };
@@ -403,7 +417,7 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
     const kind = kindOf(s);
     const out: StremioStream = {
       name: "Singularity",
-      title: streamTitle(s),
+      title: streamTitle(s, opts?.format),
       behaviorHints: { bingeGroup: `singularity-${kind}-${s.quality || "sd"}` },
     };
     if (kind === "http" && s.url) {
