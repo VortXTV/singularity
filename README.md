@@ -44,6 +44,7 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/hive/leaderboard?limit=` | none | Public trust leaderboard (top nodes by contributions; truncated node id, no pubkey) |
 | POST | `/hive/telemetry` | Ed25519 sig | A node self-reports its software version (refreshes status for the dashboard) |
 | POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" - N distinct reports crowd-reject the claim (demote + penalize + ban) |
+| POST | `/hive/pull` | `x-pull-secret` | Manually trigger the gossip sweep (pull from allowlisted peers). Disabled unless `PULL_SECRET` is set; the Cron Trigger runs it automatically regardless |
 | GET | `/health` | none | Service status |
 
 ## Configuration (the super-addon surface)
@@ -96,7 +97,7 @@ The corpus serves **three source kinds** for a title: **torrents**, **direct/HTT
 on-device with the user's own provider), `cache_facts` + `cache_confirmations` (the debrid/usenet-cache map
 with distinct-node trust - shared by torrent infohashes and nzb hashes), `torrent_confirmations` (distinct
 nodes per torrent association -> `torrents.sources`, the anti-fake-infohash signal), `health` (live torrent
-seeders), `reports` (anti-poisoning seam). Idempotent + **non-destructive** - never `DROP`; additive `ALTER`s go in a
+seeders), `reports` (anti-poisoning seam), `peers` (per-peer gossip cursor). Idempotent + **non-destructive** - never `DROP`; additive `ALTER`s go in a
 numbered `migrations/` file. See [DEPLOY.md](DEPLOY.md) for the migration discipline.
 
 A contributed torrent infohash is accepted in either ecosystem form - **40-hex** or the **32-char base32**
@@ -134,9 +135,13 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
 
 ## Not yet implemented (later federation work)
 
-- Peer-to-peer gossip between self-hosted nodes (the supernode relay model is in place: nodes push facts
-  via `/hive/contribute` and bootstrap/delta-sync via `/hive/sync`; direct node-to-node gossip + signed
-  node telemetry to the dashboard are the remaining federation pieces).
+- Instance-to-instance gossip is now in place (**pull-based**): a Cron Trigger (`scheduled()`) pulls each
+  **allowlisted** peer's `/hive/sync` delta and ingests it through `ingestSyncDelta`, which enforces **"facts
+  never trust"** - only torrent/nzb index associations + seeder health cross the boundary; cache booleans,
+  confirmation counts, node attributions, and HTTP urls are dropped, so cache trust (the 3-node gate) and the
+  HTTP gate stay locally earned and a peer's word never inflates the anti-fake-infohash `sources` count. Peers
+  come only from the operator `PEERS` allowlist (no user-supplied URL = no SSRF). Remaining: direct push
+  gossip + signed node telemetry surfaced to a dashboard.
 - Heuristic anti-cam beyond tags (CAM/TS releases are already droppable via `excludeCam` + the tag layer,
   and a fake infohash->title association now carries a distinct-node confidence count - `torrents.sources`,
   gated opt-in by `minSourceNodes`; automatic cam detection from non-tag signals is the remaining piece).

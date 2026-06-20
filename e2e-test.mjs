@@ -190,6 +190,13 @@ console.log("season packs: a tt:S torrent surfaces for an episode tt:S:E");
   ok(!otherSeason.some((s) => s.infoHash === PACK), "the S5 pack does NOT surface for an S4 episode");
 }
 
+console.log("gossip: /hive/pull is disabled unless PULL_SECRET is configured");
+{
+  // With no PULL_SECRET set (default), the manual trigger is OFF (404) - not open to the public.
+  const r = await fetch(BASE + "/hive/pull", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  ok(r.status === 404, "POST /hive/pull is disabled (404) when PULL_SECRET is unset - gossip runs via cron only");
+}
+
 console.log("federation delta-sync");
 {
   const s = await get("/hive/sync?since=0&limit=100");

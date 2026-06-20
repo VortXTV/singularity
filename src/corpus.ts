@@ -706,6 +706,60 @@ export function assembleSyncDelta(
   return { since, cursor, torrents, cache, health, http, nzb };
 }
 
+export interface IngestedFacts {
+  torrents: CleanFact[]; // index facts (infohash<->title) + metadata; trust fields (cached/seeders) ignored on write
+  torrentMeta: string[]; // the canonical metaId for each torrents[i] (parallel array; season-pack aware)
+  nzbs: CleanNzbFact[];
+  nzbMeta: string[]; // canonical metaId for each nzbs[i]
+  health: Array<{ infoHash: string; seeders: number }>;
+}
+
+// Per-array caps bound a single peer delta's DB-write cost (worst case = the sum, not 3x one number).
+const MAX_INGEST_TORRENTS = 800;
+const MAX_INGEST_NZB = 400;
+const MAX_INGEST_HEALTH = 800;
+
+/**
+ * The INBOUND federation boundary (node-to-node gossip): reduce an untrusted PEER sync delta to ONLY the
+ * facts that are safe to ingest. "Facts never trust" - we accept torrent/nzb (infohash<->title) associations
+ * and swarm seeder health, but DROP cache booleans, confirmation counts, node attributions, and HTTP urls
+ * entirely. Cache trust (the 3-node gate) and the HTTP gate are ALWAYS earned locally, never imported from a
+ * peer, so a peer's (possibly laxer) trust policy can never leak in. Every field is re-validated through the
+ * SAME validators as a direct contribution (sanitizeContribution / sanitizeNzbFact / normalizeInfoHash), so
+ * a peer cannot inject markup, a tokenized url, a malformed hash, or a fake cache claim.
+ */
+export function ingestSyncDelta(delta: unknown): IngestedFacts {
+  const d = (delta && typeof delta === "object" ? delta : {}) as Record<string, unknown>;
+  const arr = (v: unknown, cap: number): Record<string, unknown>[] =>
+    (Array.isArray(v) ? v : []).filter((x): x is Record<string, unknown> => !!x && typeof x === "object").slice(0, cap);
+
+  const torrents: CleanFact[] = [];
+  const torrentMeta: string[] = [];
+  for (const r of arr(d.torrents, MAX_INGEST_TORRENTS)) {
+    const clean = sanitizeContribution(r); // identical validation to a direct torrent contribution
+    const key = metaKey(parseMetaId(typeof r.metaId === "string" ? r.metaId : ""));
+    if (!clean || !key) continue;
+    torrents.push(clean);
+    torrentMeta.push(key);
+  }
+  const nzbs: CleanNzbFact[] = [];
+  const nzbMeta: string[] = [];
+  for (const r of arr(d.nzb, MAX_INGEST_NZB)) {
+    const clean = sanitizeNzbFact(r);
+    const key = metaKey(parseMetaId(typeof r.metaId === "string" ? r.metaId : ""));
+    if (!clean || !key) continue;
+    nzbs.push(clean);
+    nzbMeta.push(key);
+  }
+  const health: Array<{ infoHash: string; seeders: number }> = [];
+  for (const r of arr(d.health, MAX_INGEST_HEALTH)) {
+    const hash = normalizeInfoHash(r.infoHash);
+    const seeders = asInt(r.seeders);
+    if (hash && seeders != null) health.push({ infoHash: hash, seeders });
+  }
+  return { torrents, torrentMeta, nzbs, nzbMeta, health };
+}
+
 // The visible trust leaderboard (gamify hosting - a locked federation decision). Shapes node rows into
 // PUBLIC entries: a truncated node id (never the pubkey), the contribution count, trust score, version,
 // and ages. Banned nodes are excluded. Ranking is done by the query (contributions DESC).

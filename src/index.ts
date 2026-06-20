@@ -32,6 +32,8 @@ import {
   seasonIdOf,
   episodeFileIdx,
   assembleSyncDelta,
+  ingestSyncDelta,
+  type IngestedFacts,
   buildLeaderboard,
   reportsExceedThreshold,
   reConfirmationVindicates,
@@ -47,6 +49,12 @@ export interface Env {
   DB: D1Database;
   // Per-IP throttle on the write path (contribution / report spam). Optional so dry-runs/tests work.
   RL?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+  // Node-to-node gossip: a comma-separated ALLOWLIST of peer instance base URLs (https). Operator-set, never
+  // user-supplied, so the scheduled puller has no SSRF surface. Empty/unset = gossip is inert.
+  PEERS?: string;
+  // Shared secret that gates the manual POST /hive/pull trigger. UNSET = the endpoint is disabled (the cron
+  // Trigger still runs the sweep). A caller must send a matching `x-pull-secret` header.
+  PULL_SECRET?: string;
 }
 
 const SIG_WINDOW_MS = 5 * 60 * 1000; // reject signed payloads more than 5 min off the clock (anti-replay)
@@ -570,6 +578,117 @@ async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
   return json(delta, 200, false);
 }
 
+// Write peer-ingested INDEX + health facts to the local corpus. Additive only: a peer-ingested torrent does
+// NOT call recordTorrentConfirmation (a peer is not a local signed node), so `sources` stays at the column
+// default for new rows - a peer's word never inflates the anti-fake-infohash count. Cache/http are never
+// written here (ingestSyncDelta already dropped them): cache trust + the http gate stay locally earned.
+// NOTE: the CleanFact/CleanNzbFact objects still carry `cached`/`service` fields (from the shared sanitizer),
+// but they are deliberately NOT read below - never wire them into recordCache or a cache_facts write.
+async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promise<{ torrents: number; nzbs: number; health: number }> {
+  for (let i = 0; i < ing.torrents.length; i++) {
+    const c = ing.torrents[i];
+    await env.DB.prepare(
+      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(info_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, torrents.quality), " +
+        "size = COALESCE(excluded.size, torrents.size), source = COALESCE(excluded.source, torrents.source), " +
+        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), episodes = COALESCE(excluded.episodes, torrents.episodes), added_at = excluded.added_at",
+    )
+      .bind(c.infoHash, ing.torrentMeta[i], c.quality, c.size, c.source, c.fileIdx, c.tags.length ? c.tags.join(",") : null, c.languages.length ? c.languages.join(",") : null, Object.keys(c.episodes).length ? JSON.stringify(c.episodes) : null, now)
+      .run();
+  }
+  for (let i = 0; i < ing.nzbs.length; i++) {
+    const c = ing.nzbs[i];
+    await env.DB.prepare(
+      "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, tags, languages, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(nzb_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, nzbs.quality), size = COALESCE(excluded.size, nzbs.size), " +
+        "source = COALESCE(excluded.source, nzbs.source), tags = COALESCE(excluded.tags, nzbs.tags), languages = COALESCE(excluded.languages, nzbs.languages), added_at = excluded.added_at",
+    )
+      .bind(c.nzbHash, ing.nzbMeta[i], c.quality, c.size, c.source, c.tags.length ? c.tags.join(",") : null, c.languages.length ? c.languages.join(",") : null, now)
+      .run();
+  }
+  for (const h of ing.health) {
+    await env.DB.prepare(
+      "INSERT INTO health (info_hash, seeders, last_seen) VALUES (?, ?, ?) ON CONFLICT(info_hash) DO UPDATE SET seeders = excluded.seeders, last_seen = excluded.last_seen",
+    )
+      .bind(h.infoHash, h.seeders, now)
+      .run();
+  }
+  return { torrents: ing.torrents.length, nzbs: ing.nzbs.length, health: ing.health.length };
+}
+
+// Pull deltas from every ALLOWLISTED peer (env.PEERS, operator-set https URLs - never user input, so no
+// SSRF) and ingest INDEX + health facts. Per-peer cursor in `peers`. A peer being down or returning garbage
+// must never break the sweep, so each peer is isolated in try/catch.
+async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; torrents: number; nzbs: number; health: number }> {
+  // Operator allowlist only. Reject anything that isn't a clean https URL with NO userinfo (a credential in
+  // env.PEERS would leak into the fetch / logs), parsed via URL() rather than a loose regex.
+  const peers = (env.PEERS ?? "")
+    .split(",")
+    .map((s) => s.trim().replace(/\/+$/, ""))
+    .filter((s) => {
+      try {
+        const u = new URL(s);
+        return u.protocol === "https:" && !u.username && !u.password;
+      } catch {
+        return false;
+      }
+    })
+    .slice(0, 25);
+  const totals = { peers: 0, torrents: 0, nzbs: 0, health: 0 };
+  for (const peer of peers) {
+    try {
+      const row = await env.DB.prepare("SELECT cursor FROM peers WHERE url = ?").bind(peer).first<{ cursor: number }>();
+      const since = row?.cursor ?? 0;
+      // Bound a slow/hostile peer: abort after 8s, and cap the buffered body (a gzip-bomb could OOM the isolate).
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 8000);
+      let raw: string;
+      try {
+        const res = await fetch(`${peer}/hive/sync?since=${since}&limit=500`, { headers: { accept: "application/json" }, signal: ctl.signal });
+        if (!res.ok) continue;
+        raw = await res.text();
+      } finally {
+        clearTimeout(timer);
+      }
+      if (raw.length > 8 * 1024 * 1024) continue; // 8 MB cap
+      let delta: unknown;
+      try {
+        delta = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (!delta) continue;
+      const got = await ingestPeerDelta(env, ingestSyncDelta(delta), now);
+      // Cap the peer-returned cursor so a hostile peer cannot jump it to MAX_SAFE_INTEGER and starve future
+      // pulls; Math.max prevents it going backwards (no re-ingest of already-seen data).
+      const peerCursor = typeof (delta as { cursor?: unknown }).cursor === "number" ? Math.min((delta as { cursor: number }).cursor, now + 60_000) : since;
+      await env.DB.prepare("INSERT INTO peers (url, cursor, last_pull) VALUES (?, ?, ?) ON CONFLICT(url) DO UPDATE SET cursor = excluded.cursor, last_pull = excluded.last_pull")
+        .bind(peer, Math.max(since, peerCursor), now)
+        .run();
+      totals.peers++;
+      totals.torrents += got.torrents;
+      totals.nzbs += got.nzbs;
+      totals.health += got.health;
+    } catch {
+      // a peer being unreachable / malformed must not abort the whole sweep
+    }
+  }
+  return totals;
+}
+
+// Ops-triggerable gossip sweep (the Cron Trigger via scheduled() is the primary driver). Gated behind a
+// shared secret: with PULL_SECRET unset the endpoint is DISABLED (404), so it is off by default and never
+// open to the public; a matching `x-pull-secret` header is required otherwise. Pulls only from the operator
+// allowlist (no user-supplied URL), and is rate-limited.
+async function handlePull(req: Request, env: Env, ip: string): Promise<Response> {
+  if (!env.PULL_SECRET) return json({ error: "not_found" }, 404);
+  if (req.headers.get("x-pull-secret") !== env.PULL_SECRET) return json({ error: "forbidden" }, 403);
+  if (env.RL && !(await env.RL.limit({ key: `pull:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const summary = await pullFromPeers(env, Date.now());
+  console.log("[gossip] manual pull", JSON.stringify(summary));
+  return json({ pulled: true, ...summary });
+}
+
 // Public trust leaderboard (gamify hosting). Top non-barred nodes by contributions; facts only.
 async function handleLeaderboard(env: Env, url: URL): Promise<Response> {
   const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? "25") || 25));
@@ -629,7 +748,14 @@ export default {
     if (req.method === "POST" && path === "/hive/contribute") return handleContribute(req, env, ip);
     if (req.method === "POST" && path === "/hive/telemetry") return handleTelemetry(req, env, ip);
     if (req.method === "POST" && path === "/hive/report") return handleReport(req, env, ip);
+    if (req.method === "POST" && path === "/hive/pull") return handlePull(req, env, ip);
 
     return json({ error: "not_found" }, 404);
+  },
+
+  // Cron Trigger entry point (see wrangler.toml [triggers]): pull deltas from allowlisted peers (gossip).
+  async scheduled(_controller: unknown, env: Env): Promise<void> {
+    const summary = await pullFromPeers(env, Date.now());
+    console.log("[gossip] scheduled pull", JSON.stringify(summary));
   },
 };

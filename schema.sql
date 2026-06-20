@@ -149,3 +149,13 @@ CREATE TABLE IF NOT EXISTS nzbs (
   PRIMARY KEY (nzb_hash, meta_id)
 );
 CREATE INDEX IF NOT EXISTS idx_nzbs_meta ON nzbs (meta_id);
+
+-- Node-to-node gossip: per-peer delta-sync cursor. A peer is an operator-allowlisted Singularity instance
+-- (env.PEERS), never a user-supplied URL. The scheduled puller pulls each peer's /hive/sync from `cursor`,
+-- ingests INDEX + health facts only (cache/http trust is NEVER imported - see ingestSyncDelta), and advances
+-- the cursor. last_pull is for the dashboard.
+CREATE TABLE IF NOT EXISTS peers (
+  url       TEXT NOT NULL PRIMARY KEY CHECK (url LIKE 'https://%' AND length(url) <= 1024), -- https base URL
+  cursor    INTEGER NOT NULL DEFAULT 0,            -- last delta timestamp pulled from this peer
+  last_pull INTEGER NOT NULL DEFAULT 0
+);

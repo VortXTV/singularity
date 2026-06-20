@@ -26,6 +26,13 @@ database_id = "PLACEHOLDER_RUN_wrangler_d1_create_vortx-singularity"
 [observability]
 enabled = true
 
+# Node-to-node gossip (federation between self-hosted instances). The scheduled() handler pulls deltas from
+# each ALLOWLISTED peer (PEERS var, operator-set https URLs - never user input, so no SSRF) every 30 min and
+# ingests INDEX + health facts only (cache/http trust is NEVER imported - see ingestSyncDelta). Inert until
+# PEERS is set. Configure peers with: npx wrangler secret put PEERS  (or a [vars] PEERS = "https://a,https://b").
+[triggers]
+crons = ["*/30 * * * *"]
+
 # Per-IP throttle on the WRITE path (contribution / report spam control). Reads (manifest/stream) are
 # unthrottled - they are public, cacheable add-on responses. period must be 10 or 60.
 [[unsafe.bindings]]

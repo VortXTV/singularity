@@ -14,6 +14,7 @@ import {
   sanitizeTags,
   sanitizeLanguages,
   assembleSyncDelta,
+  ingestSyncDelta,
   buildLeaderboard,
   isCacheTrusted,
   isFresh,
@@ -515,6 +516,34 @@ console.log("assembleSyncDelta");
   ok(d.torrents[0].infoHash === "a".repeat(40) && d.torrents[0].tags === "hdr", "torrent fact shaped to the whitelist (camelCase)");
   ok(d.cache[0].confirmations === 3 && d.cache[0].cached === 1, "cache fact carries the trust count + boolean");
   ok(d.nzb[0].nzbHash === "ab".repeat(16) && d.http[0].url === "https://x.example/y.mkv", "nzb + http facts shaped");
+}
+
+// --- ingestSyncDelta: the INBOUND gossip boundary ("facts never trust") ---
+console.log("ingestSyncDelta (peer gossip boundary)");
+{
+  // a peer delta (camelCase, as assembleSyncDelta emits) carrying index + trust-bearing + malicious fields
+  const peerDelta = {
+    cursor: 999,
+    torrents: [
+      { infoHash: ("A".repeat(32)), metaId: "tt0903747:5", quality: "1080p", size: 8e9, source: "Peer", tags: "dv", languages: "en", episodes: { "3": 2 } }, // base32 + season pack
+      { infoHash: "not-a-hash", metaId: "tt1", quality: "1080p" }, // invalid -> dropped
+      { infoHash: "b".repeat(40), metaId: "garbage-id", quality: "720p" }, // bad metaId -> dropped
+    ],
+    cache: [{ infoHash: "a".repeat(40), service: "torbox", cached: 1, confirmations: 9 }], // TRUST -> must be dropped
+    http: [{ url: "https://evil.example/x.mkv?token=LEAK", metaId: "tt1", quality: "1080p" }], // played verbatim -> dropped
+    health: [{ infoHash: "a".repeat(40), seeders: 42 }, { infoHash: "bad", seeders: 5 }],
+    nzb: [{ nzbHash: "cd".repeat(16), metaId: "tt1", quality: "2160p", source: "PeerNzb" }],
+  };
+  const ing = ingestSyncDelta(peerDelta);
+  ok(ing.torrents.length === 1 && ing.torrents[0].infoHash === "0".repeat(40), "accepts a valid torrent index fact (base32 normalized), drops invalid ones");
+  ok(ing.torrentMeta[0] === "tt0903747:5" && ing.torrents[0].episodes["3"] === 2, "preserves the season-pack key + episode map through ingest");
+  ok(ing.nzbs.length === 1 && ing.nzbs[0].nzbHash === "cd".repeat(16), "accepts a valid nzb index fact");
+  ok(ing.health.length === 1 && ing.health[0].seeders === 42, "accepts valid seeder health, drops a malformed hash");
+  // the load-bearing safety property: NO trust + NO http url is ever ingested
+  ok(!("cache" in ing), "cache booleans are NOT ingested (the 3-node gate stays locally earned)");
+  const blob = JSON.stringify(ing).toLowerCase();
+  ok(!blob.includes("token") && !blob.includes("leak") && !blob.includes("evil.example") && !blob.includes("http"), "a peer cannot inject a tokenized/verbatim http url through gossip");
+  ok(JSON.stringify(ingestSyncDelta("garbage")).includes("[]") || ingestSyncDelta(null).torrents.length === 0, "garbage/null delta -> empty ingest");
 }
 
 // --- trust leaderboard (gamify hosting; visible reputation) ---
