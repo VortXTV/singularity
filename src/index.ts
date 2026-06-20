@@ -229,6 +229,7 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         excludeTags: config.filters.excludeTags,
         maxResults: config.filters.maxResults,
         maxPerResolution: config.filters.maxPerResolution,
+        dedup: config.filters.dedup,
         sort: config.sort,
         format: config.format,
       }

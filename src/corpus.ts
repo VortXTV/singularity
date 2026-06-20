@@ -332,6 +332,7 @@ export interface StreamFilterOptions {
   maxResults?: number; // cap the total returned (0/undefined = unlimited)
   maxPerResolution?: number; // cap how many of each resolution (0/undefined = unlimited)
   format?: string; // result-line preset: standard | detailed | minimal | compact | custom
+  dedup?: boolean; // collapse same-release torrents/nzb (kind-aware; http fallbacks are never collapsed)
 }
 
 const RES_RANK: Record<string, number> = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1, SD: 0 };
@@ -401,6 +402,20 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
           return (b.seeders ?? 0) - (a.seeders ?? 0); // then by seeders
         },
   );
+  // Smart dedup, after sort so the strongest in each group survives. Kind-scoped signature (quality +
+  // 0.5GB size bucket + sorted tags) collapses the same release re-listed under different infohashes;
+  // distinct HTTP urls are independent fallbacks and are never collapsed.
+  if (opts?.dedup) {
+    const seen = new Set<string>();
+    shown = shown.filter((s) => {
+      const k = kindOf(s);
+      if (k === "http") return true;
+      const sig = `${k}|${s.quality ?? ""}|${Math.round((s.size ?? 0) / 5e8)}|${[...(s.tags ?? [])].sort().join("")}`;
+      if (seen.has(sig)) return false;
+      seen.add(sig);
+      return true;
+    });
+  }
   // Result limits, applied AFTER sort so the strongest sources survive the cap: per-resolution first, then
   // the global total.
   if (opts?.maxPerResolution && opts.maxPerResolution > 0) {

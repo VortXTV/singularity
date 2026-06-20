@@ -41,6 +41,7 @@ export interface SingularityFilters {
   excludeTags: string[]; // drop sources carrying any of these tags
   maxResults: number; // cap total results (0 = unlimited)
   maxPerResolution: number; // cap results per resolution (0 = unlimited)
+  dedup: boolean; // collapse same-release torrents/nzb (http fallbacks never collapsed)
 }
 export interface SingularityConfig {
   debridServices: string[]; // which services you use (keys are in your VortX account, NOT here)
@@ -58,7 +59,7 @@ export const DEFAULT_CONFIG: SingularityConfig = {
   debridServices: [],
   usenetServices: [],
   addons: [],
-  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], maxResults: 0, maxPerResolution: 0 },
+  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], maxResults: 0, maxPerResolution: 0, dedup: false },
   sort: ["cached", "resolution", "seeders"],
   format: "standard",
   proxyEnabled: false,
@@ -114,6 +115,7 @@ export function validateConfig(raw: unknown): SingularityConfig {
       excludeTags: pickKnown(f.excludeTags, KNOWN_TAGS_LIST, false),
       maxResults: clamp(f.maxResults, 0, 200, 0),
       maxPerResolution: clamp(f.maxPerResolution, 0, 50, 0),
+      dedup: bool(f.dedup, false),
     },
     sort: pickKnown(r.sort, SORT_KEYS),
     format,

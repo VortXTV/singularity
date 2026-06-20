@@ -144,6 +144,9 @@ export function renderConfigurePage(baseUrl: string): string {
     <div class="field"><label class="lbl" for="maxResults">Max results total (0 = unlimited)</label><input id="maxResults" type="number" min="0" max="200" value="0"></div>
     <div class="field"><label class="lbl" for="maxPerResolution">Max per resolution (0 = unlimited)</label><input id="maxPerResolution" type="number" min="0" max="50" value="0"></div>
   </div>
+  <div class="row" style="margin-top:14px">
+    <label class="toggle"><input id="dedup" type="checkbox"> Collapse duplicate releases (keep the healthiest)</label>
+  </div>
 </section>
 
 <section class="card"><h2>Ratings on posters</h2>
@@ -181,6 +184,7 @@ export function renderConfigurePage(baseUrl: string): string {
         includeTags: vals('includeTags'), excludeTags: vals('excludeTags'),
         maxResults: Math.min(200, Math.max(0, parseInt(document.getElementById('maxResults').value||'0',10)||0)),
         maxPerResolution: Math.min(50, Math.max(0, parseInt(document.getElementById('maxPerResolution').value||'0',10)||0)),
+        dedup: document.getElementById('dedup').checked,
       },
       sort: vals('sort'),
       format: document.getElementById('format').value,
