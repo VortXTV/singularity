@@ -694,15 +694,29 @@ function preferScore(s: CorpusStream, opts?: StreamFilterOptions): number {
   return preferRank(s.quality, opts?.preferredResolutions) * 1_000_000 + preferRankMulti(s.languages, opts?.preferredLanguages) * 1_000 + preferRankMulti(s.tags, opts?.preferredTags);
 }
 
+// Each sort key maps to a comparator (negative = a before b). Keep this the SINGLE source of which keys
+// actually do something: config.ts SORT_KEYS must equal IMPLEMENTED_SORT_KEYS (guarded by a test), so a
+// key offered in the /configure UI can never silently no-op the way `quality`/`service`/`bitrate`/`language`/
+// `age` once did (advertised but never compared - the corpus has no runtime for bitrate, added_at is
+// last-seen not release-age, there is no canonical service order, and language/tag/quality preference is
+// served better by the `preferred` soft-rank key).
+const SORT_COMPARATORS: Record<string, (a: CorpusStream, b: CorpusStream, opts?: StreamFilterOptions) => number> = {
+  cached: (a, b) => (b.cachedOn.length > 0 ? 1 : 0) - (a.cachedOn.length > 0 ? 1 : 0),
+  resolution: (a, b) => resRank(b.quality) - resRank(a.quality),
+  seeders: (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0),
+  size: (a, b) => (b.size ?? 0) - (a.size ?? 0),
+  preferred: (a, b, opts) => preferScore(a, opts) - preferScore(b, opts), // lower score = more preferred -> first
+};
+
+// The sort keys the comparator actually implements. config.SORT_KEYS is validated against this set.
+export const IMPLEMENTED_SORT_KEYS: readonly string[] = Object.keys(SORT_COMPARATORS);
+
 function sortByKeys(keys: string[], opts?: StreamFilterOptions): (a: CorpusStream, b: CorpusStream) => number {
   return (a, b) => {
     for (const k of keys) {
-      let d = 0;
-      if (k === "cached") d = (b.cachedOn.length > 0 ? 1 : 0) - (a.cachedOn.length > 0 ? 1 : 0);
-      else if (k === "resolution") d = resRank(b.quality) - resRank(a.quality);
-      else if (k === "seeders") d = (b.seeders ?? 0) - (a.seeders ?? 0);
-      else if (k === "size") d = (b.size ?? 0) - (a.size ?? 0);
-      else if (k === "preferred") d = preferScore(a, opts) - preferScore(b, opts); // lower score = more preferred -> first
+      const cmp = SORT_COMPARATORS[k];
+      if (!cmp) continue;
+      const d = cmp(a, b, opts);
       if (d !== 0) return d;
     }
     return 0;

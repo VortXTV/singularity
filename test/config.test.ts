@@ -16,9 +16,11 @@ import {
   buildConfiguredManifest,
   DEBRID_SERVICES,
   USENET_SERVICES,
+  SORT_KEYS,
   type SingularityConfig,
 } from "../src/config.ts";
 import { renderConfigurePage } from "../src/configure.ts";
+import { IMPLEMENTED_SORT_KEYS } from "../src/corpus.ts";
 
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => { if (c) { pass++; console.log("  PASS", m); } else { fail++; console.log("  FAIL", m); } };
@@ -123,6 +125,19 @@ console.log("renderConfigurePage (VortX visual, no rival names)");
   ok(/Debrid/i.test(html) && /Usenet/i.test(html) && /Filters/i.test(html) && /Ratings/i.test(html) && /Recommendations/i.test(html), "renders all feature sections");
   ok(/Quality tags/i.test(html) && /includeTags/.test(html) && /excludeTags/.test(html), "renders the per-tag include/exclude section");
   ok(/Singularity/.test(html), "branded Singularity");
+}
+
+// Regression guard: every sort key the /configure UI offers MUST be implemented by the corpus comparator,
+// and vice versa. This is the structural fix for the inert-sort-key bug (config advertised quality/service/
+// bitrate/language/age, the comparator silently no-op'd them). If the two drift, this fails.
+{
+  const advertised = [...SORT_KEYS].sort();
+  const implemented = [...IMPLEMENTED_SORT_KEYS].sort();
+  ok(
+    advertised.length === implemented.length && advertised.every((k, i) => k === implemented[i]),
+    `SORT_KEYS == IMPLEMENTED_SORT_KEYS (no inert sort keys): advertised=[${advertised}] implemented=[${implemented}]`,
+  );
+  ok(!SORT_KEYS.includes("bitrate") && !SORT_KEYS.includes("age") && !SORT_KEYS.includes("service") && !SORT_KEYS.includes("language") && !SORT_KEYS.includes("quality"), "the 5 inert keys are removed from the advertised surface");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

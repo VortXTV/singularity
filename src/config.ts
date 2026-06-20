@@ -20,7 +20,11 @@ export const DEBRID_SERVICES = [
 // Usenet options (provider keys / server details live in the VortX account, never here).
 export const USENET_SERVICES = ["easynews", "torbox", "nntp", "self_hosted"];
 export const RESOLUTIONS = ["2160p", "1080p", "720p", "480p", "SD"];
-export const SORT_KEYS = ["cached", "preferred", "resolution", "quality", "seeders", "size", "service", "bitrate", "language", "age"];
+// Only keys the corpus comparator actually implements (corpus.ts IMPLEMENTED_SORT_KEYS); a test asserts the
+// two stay in lockstep so the /configure UI never offers an inert sort key. `quality` was a duplicate of
+// `resolution`; `service`/`bitrate`/`language`/`age` had no honest data to sort on (the `preferred` soft-rank
+// key covers language/tag/resolution preference).
+export const SORT_KEYS = ["cached", "preferred", "resolution", "seeders", "size"];
 export const FORMAT_PRESETS = ["standard", "detailed", "minimal", "compact", "custom"];
 export const HISTORY_SOURCES = ["library", "trakt", "simkl"];
 
