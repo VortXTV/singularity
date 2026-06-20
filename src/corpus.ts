@@ -316,6 +316,8 @@ export interface StreamFilterOptions {
   includeTags?: string[]; // keep only sources carrying AT LEAST ONE of these tags
   excludeTags?: string[]; // drop sources carrying ANY of these tags
   sort?: string[]; // ordered keys: cached | resolution | seeders | size
+  maxResults?: number; // cap the total returned (0/undefined = unlimited)
+  maxPerResolution?: number; // cap how many of each resolution (0/undefined = unlimited)
 }
 
 const RES_RANK: Record<string, number> = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1, SD: 0 };
@@ -385,6 +387,18 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
           return (b.seeders ?? 0) - (a.seeders ?? 0); // then by seeders
         },
   );
+  // Result limits, applied AFTER sort so the strongest sources survive the cap: per-resolution first, then
+  // the global total.
+  if (opts?.maxPerResolution && opts.maxPerResolution > 0) {
+    const perRes = new Map<string, number>();
+    shown = shown.filter((s) => {
+      const k = s.quality ?? "SD";
+      const n = (perRes.get(k) ?? 0) + 1;
+      perRes.set(k, n);
+      return n <= opts.maxPerResolution!;
+    });
+  }
+  if (opts?.maxResults && opts.maxResults > 0) shown = shown.slice(0, opts.maxResults);
   const streams: StremioStream[] = shown.map((s) => {
     const kind = kindOf(s);
     const out: StremioStream = {
