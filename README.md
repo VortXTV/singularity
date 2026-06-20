@@ -152,9 +152,10 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
 
 - Instance-to-instance gossip is now in place (**pull-based**): a Cron Trigger (`scheduled()`) pulls each
   **allowlisted** peer's `/hive/sync` delta and ingests it through `ingestSyncDelta`, which enforces **"facts
-  never trust"** - only torrent/nzb index associations + seeder health cross the boundary; cache booleans,
-  confirmation counts, node attributions, and HTTP urls are dropped, so cache trust (the 3-node gate) and the
-  HTTP gate stay locally earned and a peer's word never inflates the anti-fake-infohash `sources` count. Peers
+  never trust"** - torrent/nzb index associations + seeder health cross the boundary, AND now SIGNED CacheFacts (they
+  self-verify, so a peer relays them but cannot forge them); HTTP urls + unsigned confirmation counts + node
+  attribution on index facts are dropped, so the HTTP gate stays locally earned and a peer's word never inflates
+  the anti-fake-infohash `sources` count. Peers
   come only from the operator `PEERS` allowlist (no user-supplied URL = no SSRF). Remaining: direct push
   gossip + signed node telemetry surfaced to a dashboard.
 - Heuristic anti-cam beyond tags (CAM/TS releases are already droppable via `excludeCam` + the tag layer,
