@@ -31,6 +31,7 @@ import {
   assembleSyncDelta,
   buildLeaderboard,
   reportsExceedThreshold,
+  reConfirmationVindicates,
   CACHE_TTL_MS,
   MIN_CONFIRMATIONS,
   PENALTY_BAN_THRESHOLD,
@@ -264,12 +265,31 @@ async function recordCache(env: Env, hash: string, service: string, nodeId: stri
   )
     .bind(hash, service, now - CACHE_TTL_MS)
     .first<{ n: number }>();
+  const n = cnt?.n ?? 1;
   await env.DB.prepare(
     "INSERT INTO cache_facts (info_hash, service, cached, confirmations, last_verified) VALUES (?, ?, 1, ?, ?) " +
       "ON CONFLICT(info_hash, service) DO UPDATE SET cached = 1, confirmations = excluded.confirmations, last_verified = excluded.last_verified",
   )
-    .bind(hash, service, cnt?.n ?? 1, now)
+    .bind(hash, service, n, now)
     .run();
+  // False-reporter counter-signal: if this confirmation re-establishes a claim that distinct reporters had
+  // crowd-rejected (handleReport demoted it + cleared its confirmations), a FRESH distinct-node crowd has now
+  // overruled them. Penalize those reporters, ban repeat offenders, and clear the now-adjudicated reports so
+  // they cannot re-demote the claim or be penalized twice. This makes reporting costly to abuse (griefing).
+  if (n >= MIN_CONFIRMATIONS) {
+    const rc = await env.DB.prepare("SELECT COUNT(DISTINCT reporter) AS n FROM reports WHERE info_hash = ? AND service = ?")
+      .bind(hash, service)
+      .first<{ n: number }>();
+    if (reConfirmationVindicates(n, rc?.n ?? 0)) {
+      await env.DB.prepare(
+        "UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT DISTINCT reporter FROM reports WHERE info_hash = ? AND service = ?)",
+      )
+        .bind(hash, service)
+        .run();
+      await env.DB.prepare("UPDATE nodes SET banned = 1 WHERE banned = 0 AND penalties >= ?").bind(PENALTY_BAN_THRESHOLD).run();
+      await env.DB.prepare("DELETE FROM reports WHERE info_hash = ? AND service = ?").bind(hash, service).run();
+    }
+  }
 }
 
 // An HTTP URL is played verbatim by every client, so it is gated like the cache: record a DISTINCT-node

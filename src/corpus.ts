@@ -258,6 +258,18 @@ export function reportsExceedThreshold(distinctReporters: number, threshold = RE
   return distinctReporters >= threshold;
 }
 
+/**
+ * The false-reporter counter-signal: a claim that distinct reporters had crowd-rejected (>= REPORT_THRESHOLD)
+ * is later RE-CONFIRMED by a fresh distinct-node crowd (>= MIN_CONFIRMATIONS). The crowd has overruled the
+ * reporters, so they are penalized in turn - this is what makes reporting itself costly to abuse (the
+ * symmetric other half of reportsExceedThreshold). HONEST LIMIT: a cache that genuinely flapped (truly
+ * uncached, then re-cached) can trip this; the penalty is small (+1, ban at the same threshold) and the
+ * reports are cleared on vindication so it cannot compound, but it is a heuristic, not proof of malice.
+ */
+export function reConfirmationVindicates(confirmations: number, distinctReporters: number): boolean {
+  return isCacheTrusted({ confirmations }) && reportsExceedThreshold(distinctReporters);
+}
+
 export function isNodeBarred(node: { penalties: number; banned?: boolean }): boolean {
   return node.banned === true || node.penalties >= PENALTY_BAN_THRESHOLD;
 }

@@ -22,6 +22,7 @@ import {
   buildStreamResponse,
   parseMetaId,
   reportsExceedThreshold,
+  reConfirmationVindicates,
   CACHE_TTL_MS,
   MIN_CONFIRMATIONS,
   PENALTY_BAN_THRESHOLD,
@@ -446,6 +447,16 @@ console.log("report threshold");
   ok(REPORT_THRESHOLD === 3, "report threshold = 3 distinct reporters (symmetric with the cache gate)");
   ok(reportsExceedThreshold(3) === true && reportsExceedThreshold(2) === false, "exceeded only at >= threshold");
   ok(reportsExceedThreshold(1, 1) === true, "honors a custom threshold");
+}
+
+// --- false-reporter counter-signal: a re-confirmed claim vindicates against its reporters ---
+console.log("reConfirmationVindicates (false-reporter counter-signal)");
+{
+  ok(reConfirmationVindicates(3, 3) === true, "re-confirmed (>=3 nodes) + was crowd-rejected (>=3 reporters) -> reporters penalized");
+  ok(reConfirmationVindicates(2, 3) === false, "not yet re-trusted (only 2 fresh confirmations) -> no penalty");
+  ok(reConfirmationVindicates(3, 2) === false, "claim was never crowd-rejected (only 2 reporters) -> no false-reporter penalty");
+  ok(reConfirmationVindicates(5, 5) === true, "strong re-confirmation + many reporters still vindicates");
+  ok(reConfirmationVindicates(0, 0) === false, "a brand-new claim with no reports never triggers the counter-signal");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

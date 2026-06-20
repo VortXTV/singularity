@@ -77,7 +77,11 @@ fetchers are the next build phases (the schema + manifest + routing ship now).
 - A node is identified by an **Ed25519 keypair**; `nodeId = sha256(pubkey)` so it cannot impersonate
   another node. Contributions are signed over `${ts}.${factsJson}` with a 5-minute anti-replay window.
 - **Penalties** (false cache claims / abusive reports) accrue per node; past a threshold the node is
-  **barred** from the benefits, invisibly. Adjudication (re-verify before penalizing) is later work.
+  **barred** from the benefits, invisibly. The report loop is **symmetric**: N distinct reports crowd-reject a
+  claim (demote it + penalize its confirmers), and if a fresh distinct-node crowd later **re-confirms** that
+  same claim, the reporters were overruled and are penalized in turn (`reConfirmationVindicates`) - so
+  reporting is as costly to abuse as confirming. Full adjudication (re-verify the debrid before penalizing)
+  is still later work; the counter-signal is a crowd heuristic, not proof of malice.
 
 ## Corpus tables (`schema.sql`)
 
@@ -122,7 +126,5 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
   node telemetry to the dashboard are the remaining federation pieces).
 - Anti-cam / fake-infohash trust corpus (today any stored torrent from a non-barred node is surfaced;
   only the *cache* trust gate is enforced).
-- False-reporter penalties (the contributor side is live: N distinct reports demote a claim + penalize/ban
-  its confirmers; penalizing a *false* reporter needs a counter-signal and is still to come).
 - Node management surfaces (the dashboard "Nodes" section + each node's localhost UI).
 - Contribution-gated reads.

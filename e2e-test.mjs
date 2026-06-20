@@ -183,6 +183,13 @@ console.log("report -> crowd-rejection (anti-poisoning)");
   }
   row = ((await get(`/stream/movie/${META3}.json`)).json?.streams || []).find((s) => s.infoHash === HASHR);
   ok(!row || !/Cached/i.test(row.title), "after 3 distinct reports, the cache claim is demoted (no longer shown cached)");
+  // False-reporter counter-signal: a FRESH distinct-node crowd re-confirms the demoted claim. recordCache
+  // rebuilds the cleared confirmations, re-trusts the claim, and (invisibly) penalizes the now-overruled
+  // reporters + clears the adjudicated reports. Observable effect: the claim is shown cached again.
+  const n4 = await newNode(), n5 = await newNode(), n6 = await newNode();
+  await contribute(n4, fact); await contribute(n5, fact); await contribute(n6, fact);
+  row = ((await get(`/stream/movie/${META3}.json`)).json?.streams || []).find((s) => s.infoHash === HASHR);
+  ok(row && /Cached/i.test(row.title), "after 3 FRESH nodes re-confirm, the claim is vindicated + shown cached again (false reporters penalized)");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
