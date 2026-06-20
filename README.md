@@ -88,6 +88,10 @@ with distinct-node trust - shared by torrent infohashes and nzb hashes), `health
 `reports` (anti-poisoning seam). Idempotent + **non-destructive** - never `DROP`; additive `ALTER`s go in a
 numbered `migrations/` file. See [DEPLOY.md](DEPLOY.md) for the migration discipline.
 
+A contributed torrent infohash is accepted in either ecosystem form - **40-hex** or the **32-char base32**
+(magnet/indexer) form - and stored canonically as 40-hex (`normalizeInfoHash` in `src/corpus.ts`), so the
+same torrent submitted in different forms converges on one row, one trust count, one dedup key.
+
 Each kind renders to the right Stremio stream shape (`src/corpus.ts` `buildStreamResponse`): a torrent ->
 `infoHash` (the client mints the magnet / resolves debrid with its own token), an HTTP source -> a public
 `url`, an NZB -> an on-device-resolve marker (no url, no token). The facts-not-tokens invariant holds across
@@ -120,5 +124,4 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
 - False-reporter penalties (the contributor side is live: N distinct reports demote a claim + penalize/ban
   its confirmers; penalizing a *false* reporter needs a counter-signal and is still to come).
 - Node management surfaces (the dashboard "Nodes" section + each node's localhost UI).
-- Base32 btih normalization on ingest (today only 40-hex infohashes are accepted).
-- Contribution-gated reads + the visible trust leaderboard.
+- Contribution-gated reads.

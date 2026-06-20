@@ -21,6 +21,7 @@ import {
   sanitizeContribution,
   sanitizeHttpFact,
   sanitizeNzbFact,
+  normalizeInfoHash,
   isCacheTrusted,
   isFresh,
   isNodeBarred,
@@ -396,7 +397,10 @@ async function handleReport(req: Request, env: Env, ip: string): Promise<Respons
   if (env.RL && !(await env.RL.limit({ key: `report:${ip}` })).success) return json({ error: "rate_limited" }, 429);
   const body = await readJSON(req);
   if (!body) return json({ error: "bad_request" }, 400);
-  const infoHash = typeof body.infoHash === "string" ? body.infoHash.trim().toLowerCase() : "";
+  const rawHash = typeof body.infoHash === "string" ? body.infoHash.trim().toLowerCase() : "";
+  // A reported torrent btih may arrive base32 - canonicalize it to the 40-hex key the corpus stored it
+  // under; a 32-hex nzb hash falls through unchanged so a report still matches its claim either way.
+  const infoHash = normalizeInfoHash(rawHash) ?? rawHash;
   const service = typeof body.service === "string" ? body.service.toLowerCase() : "";
   const reporter = typeof body.reporter === "string" ? body.reporter.toLowerCase() : "";
   // reporter must be a real node id (sha256(pubkey) = 64 hex) that EXISTS, so a report cannot be forged

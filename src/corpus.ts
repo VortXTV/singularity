@@ -35,6 +35,43 @@ export interface CleanFact {
 }
 
 const HEX40 = /^[a-f0-9]{40}$/;
+// A BitTorrent v1 infohash is 20 bytes. The ecosystem writes it two ways: 40 hex chars, OR 32 base32
+// chars (RFC 4648, alphabet A-Z2-7, no padding) as used in magnet links and by many indexers. We store
+// the canonical 40-hex form, so a base32 contribution must be decoded on ingest - otherwise the same
+// torrent in each form never converges on the 3-node trust gate or dedup.
+const B32_32 = /^[a-z2-7]{32}$/; // a base32-encoded 20-byte btih, lowercased
+const B32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"; // RFC 4648 base32, lowercased
+
+/** Decode a 32-char lowercased base32 btih to its 40-hex form, or null if any char is out of alphabet. */
+function base32ToHex40(s: string): string | null {
+  let bits = 0;
+  let value = 0;
+  let hex = "";
+  for (let i = 0; i < s.length; i++) {
+    const idx = B32_ALPHABET.indexOf(s[i]);
+    if (idx < 0) return null;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      hex += ((value >>> bits) & 0xff).toString(16).padStart(2, "0");
+      value &= (1 << bits) - 1; // keep only the unconsumed low bits so `value` can't overflow 32-bit
+    }
+  }
+  return hex.length === 40 ? hex : null;
+}
+
+/**
+ * Canonicalize an untrusted torrent infohash to lowercase 40-hex, accepting either the 40-hex or the
+ * 32-char base32 form; null if it is neither. Exported so the Worker can normalize a reported hash to
+ * the same key the corpus stored it under.
+ */
+export function normalizeInfoHash(raw: unknown): string | null {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (HEX40.test(s)) return s;
+  if (B32_32.test(s)) return base32ToHex40(s);
+  return null;
+}
 // Field hygiene: contributed strings are untrusted, so each is constrained to a safe shape (no markup,
 // no control chars, no RTL/homoglyph tricks) before it can enter the corpus and render in a client.
 const QUALITY_RE = /^[0-9a-zA-Z]{1,16}$/; // "2160p", "1080p", "4K", "HDR"
@@ -78,8 +115,8 @@ export function sanitizeTags(v: unknown): string[] {
  * resolved link in the input can never reach the corpus.
  */
 export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | null {
-  const hash = typeof raw.infoHash === "string" ? raw.infoHash.trim().toLowerCase() : "";
-  if (!HEX40.test(hash)) return null; // (base32 btih normalization is a later additive step)
+  const hash = normalizeInfoHash(raw.infoHash); // 40-hex passthrough OR 32-char base32 -> 40-hex
+  if (!hash) return null;
   return {
     infoHash: hash,
     quality: matchOrNull(raw.quality, QUALITY_RE),
