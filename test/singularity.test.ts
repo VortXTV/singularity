@@ -28,6 +28,8 @@ import {
   episodeFileIdx,
   parseCatalogSearch,
   corpusPresentImdbs,
+  preferRank,
+  preferRankMulti,
   reportsExceedThreshold,
   reConfirmationVindicates,
   CACHE_TTL_MS,
@@ -440,6 +442,31 @@ console.log("includeKinds / excludeKinds (source-type filters)");
   ok(r.streams.length === 1 && r.streams[0].infoHash === "a".repeat(40), "includeKinds=torrent keeps only torrents");
   r = buildStreamResponse(rows, now, {});
   ok(r.streams.length === 3, "no kind filter -> all three kinds surface");
+}
+
+// --- preferred-value ordering (soft ranking; floats matches up, never excludes) ---
+console.log("preferred ordering (preferRank + the 'preferred' sort key)");
+{
+  ok(preferRank("1080p", ["1080p", "2160p"]) === 0 && preferRank("2160p", ["1080p", "2160p"]) === 1, "earlier in the list = lower (more preferred) rank");
+  ok(preferRank("720p", ["1080p", "2160p"]) === 2, "an unlisted value ranks worst (list length)");
+  ok(preferRank("720p", undefined) === 0 && preferRank("720p", []) === 0, "no preferred list -> neutral 0");
+  ok(preferRankMulti(["en", "fr"], ["ja", "en"]) === 1 && preferRankMulti(["de"], ["ja", "en"]) === 2, "multi-valued takes the BEST (lowest) matching position");
+
+  const now = 7_950_000_000_000;
+  const base = (over) => ({ kind: "torrent", infoHash: "0".repeat(40), source: "x", seeders: 50, cachedOn: [], trusted: true, lastVerified: now - 1000, ...over });
+  const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40);
+  // A=2160p SDR, B=1080p HDR, C=2160p HDR. Prefer 1080p then HDR. NONE excluded; just reordered.
+  const rows = [
+    base({ infoHash: A, quality: "2160p", tags: [] }),
+    base({ infoHash: B, quality: "1080p", tags: ["hdr"] }),
+    base({ infoHash: C, quality: "2160p", tags: ["hdr"] }),
+  ];
+  const r = buildStreamResponse(rows, now, { sort: ["preferred"], preferredResolutions: ["1080p", "2160p"], preferredTags: ["hdr"] });
+  ok(r.streams.length === 3, "preferred NEVER excludes: all sources still present");
+  ok(r.streams[0].infoHash === B, "preferred resolution (1080p) wins the top slot over 2160p");
+  // without the preferred key, the soft prefs are ignored (default order)
+  const r2 = buildStreamResponse(rows, now, { sort: ["resolution"], preferredResolutions: ["1080p"] });
+  ok(/2160p/.test(r2.streams[0].title || "") || r2.streams[0].infoHash !== B, "preferred lists are inert unless 'preferred' is in the sort keys");
 }
 
 // --- result limits (cap total + per-resolution, applied after sort so the best survive) ---

@@ -20,7 +20,7 @@ export const DEBRID_SERVICES = [
 // Usenet options (provider keys / server details live in the VortX account, never here).
 export const USENET_SERVICES = ["easynews", "torbox", "nntp", "self_hosted"];
 export const RESOLUTIONS = ["2160p", "1080p", "720p", "480p", "SD"];
-export const SORT_KEYS = ["cached", "resolution", "quality", "seeders", "size", "service", "bitrate", "language", "age"];
+export const SORT_KEYS = ["cached", "preferred", "resolution", "quality", "seeders", "size", "service", "bitrate", "language", "age"];
 export const FORMAT_PRESETS = ["standard", "detailed", "minimal", "compact", "custom"];
 export const HISTORY_SOURCES = ["library", "trakt", "simkl"];
 
@@ -45,6 +45,9 @@ export interface SingularityFilters {
   minSourceNodes: number; // require this many distinct nodes per torrent (anti-fake-infohash; 1 = off)
   includeKinds: string[]; // keep only these source kinds (torrent/http/nzb); empty = all
   excludeKinds: string[]; // drop these source kinds
+  preferredResolutions: string[]; // soft ordering (the "preferred" sort key); never excludes
+  preferredLanguages: string[]; // soft ordering: float these audio languages up
+  preferredTags: string[]; // soft ordering: e.g. HDR10+ over HDR
   maxResults: number; // cap total results (0 = unlimited)
   maxPerResolution: number; // cap results per resolution (0 = unlimited)
   dedup: boolean; // collapse same-release torrents/nzb (http fallbacks never collapsed)
@@ -66,7 +69,7 @@ export const DEFAULT_CONFIG: SingularityConfig = {
   debridServices: [],
   usenetServices: [],
   addons: [],
-  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], includeLanguages: [], excludeLanguages: [], minSourceNodes: 1, includeKinds: [], excludeKinds: [], maxResults: 0, maxPerResolution: 0, dedup: false },
+  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], includeLanguages: [], excludeLanguages: [], minSourceNodes: 1, includeKinds: [], excludeKinds: [], preferredResolutions: [], preferredLanguages: [], preferredTags: [], maxResults: 0, maxPerResolution: 0, dedup: false },
   sort: ["cached", "resolution", "seeders"],
   format: "standard",
   formatTemplate: "",
@@ -126,6 +129,9 @@ export function validateConfig(raw: unknown): SingularityConfig {
       minSourceNodes: clamp(f.minSourceNodes, 1, 10, 1),
       includeKinds: pickKnown(f.includeKinds, SOURCE_KINDS),
       excludeKinds: pickKnown(f.excludeKinds, SOURCE_KINDS),
+      preferredResolutions: pickKnown(f.preferredResolutions, RESOLUTIONS, false),
+      preferredLanguages: pickKnown(f.preferredLanguages, KNOWN_LANGUAGES_LIST),
+      preferredTags: pickKnown(f.preferredTags, KNOWN_TAGS_LIST, false),
       maxResults: clamp(f.maxResults, 0, 200, 0),
       maxPerResolution: clamp(f.maxPerResolution, 0, 50, 0),
       dedup: bool(f.dedup, false),

@@ -60,8 +60,9 @@ URL path (`/:config/...`). It exposes the full feature surface:
   secret-looking.
 - **Your add-ons** to aggregate (bring any manifest URLs), **Filters** (resolutions, min-seeders, max-size,
   HDR-only, exclude-CAM, exclude regex, per-tag include/exclude, **audio-language include/exclude**,
-  **source-type include/exclude** (torrent / direct / usenet), **min source nodes**), **Sort** keys,
-  **Format** (presets or a **custom `{variable}` template** for the stream line), **Proxy** toggle.
+  **source-type include/exclude** (torrent / direct / usenet), **min source nodes**), **Sort** keys (incl. a
+  **`preferred` soft-ranking key** that floats your preferred resolutions / languages / tags to the top
+  without excluding anything else), **Format** (presets or a **custom `{variable}` template**), **Proxy** toggle.
 - **Ratings on posters** - bake IMDb / Rotten Tomatoes / TMDB ratings + quality badges onto poster art
   (adds the `meta` resource).
 - **Recommendations** - personalized "Top Picks for You" / "Because You Watched" catalogs from your taste

@@ -557,7 +557,12 @@ export interface StreamFilterOptions {
   minSourceNodes?: number; // torrents: require this many distinct contributing nodes (anti-fake-infohash; 1 = off)
   includeKinds?: string[]; // keep only these source kinds (torrent/http/nzb); empty = all
   excludeKinds?: string[]; // drop these source kinds (e.g. hide nzb if you have no usenet provider)
-  sort?: string[]; // ordered keys: cached | resolution | seeders | size
+  sort?: string[]; // ordered keys: cached | resolution | seeders | size | preferred
+  // Soft preference ordering (the `preferred` sort key consults these). Unlike include/exclude they NEVER
+  // drop a source; a source matching an earlier-listed value just floats up. Ordered = priority.
+  preferredResolutions?: string[]; // e.g. ["1080p","2160p"] to prefer 1080p (bandwidth) without hiding 4K
+  preferredLanguages?: string[]; // float your audio languages up
+  preferredTags?: string[]; // e.g. ["hdr10plus","hdr","dv"] to prefer HDR10+ over HDR
   maxResults?: number; // cap the total returned (0/undefined = unlimited)
   maxPerResolution?: number; // cap how many of each resolution (0/undefined = unlimited)
   format?: string; // result-line preset: standard | detailed | minimal | compact | custom
@@ -605,7 +610,30 @@ function applyFilters(streams: CorpusStream[], opts: StreamFilterOptions): Corpu
 }
 
 /** Comparator from the user's ordered sort keys; the first key that distinguishes two streams wins. */
-function sortByKeys(keys: string[]): (a: CorpusStream, b: CorpusStream) => number {
+/** Position of a value in an ordered preferred list (lower = more preferred). 0 when no list (neutral);
+ *  list length (worst) when the value is not listed. Soft signal only - never excludes. */
+export function preferRank(value: string | null, preferred?: string[]): number {
+  if (!preferred || preferred.length === 0) return 0;
+  const i = preferred.indexOf((value ?? "").toLowerCase());
+  return i === -1 ? preferred.length : i;
+}
+/** Best (lowest) preferred position across a multi-valued dimension (tags, languages). */
+export function preferRankMulti(values: string[] | undefined, preferred?: string[]): number {
+  if (!preferred || preferred.length === 0) return 0;
+  let best = preferred.length;
+  for (const v of values ?? []) {
+    const i = preferred.indexOf(v.toLowerCase());
+    if (i !== -1 && i < best) best = i;
+  }
+  return best;
+}
+// One comparable number combining the three preference dimensions lexicographically (resolution > language >
+// tag). Each rank is small (list lengths well under 1000), so the base-1000 packing preserves the ordering.
+function preferScore(s: CorpusStream, opts?: StreamFilterOptions): number {
+  return preferRank(s.quality, opts?.preferredResolutions) * 1_000_000 + preferRankMulti(s.languages, opts?.preferredLanguages) * 1_000 + preferRankMulti(s.tags, opts?.preferredTags);
+}
+
+function sortByKeys(keys: string[], opts?: StreamFilterOptions): (a: CorpusStream, b: CorpusStream) => number {
   return (a, b) => {
     for (const k of keys) {
       let d = 0;
@@ -613,6 +641,7 @@ function sortByKeys(keys: string[]): (a: CorpusStream, b: CorpusStream) => numbe
       else if (k === "resolution") d = resRank(b.quality) - resRank(a.quality);
       else if (k === "seeders") d = (b.seeders ?? 0) - (a.seeders ?? 0);
       else if (k === "size") d = (b.size ?? 0) - (a.size ?? 0);
+      else if (k === "preferred") d = preferScore(a, opts) - preferScore(b, opts); // lower score = more preferred -> first
       if (d !== 0) return d;
     }
     return 0;
@@ -637,7 +666,7 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
   if (opts) shown = applyFilters(shown, opts);
   shown.sort(
     opts?.sort && opts.sort.length > 0
-      ? sortByKeys(opts.sort)
+      ? sortByKeys(opts.sort, opts)
       : (a, b) => {
           const ac = a.cachedOn.length > 0 ? 1 : 0;
           const bc = b.cachedOn.length > 0 ? 1 : 0;

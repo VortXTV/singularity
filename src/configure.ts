@@ -39,6 +39,7 @@ const label = (s: string) => LABELS[s] ?? s.replace(/\b\w/g, (m) => m.toUpperCas
 const checks = (group: string, items: string[], on: string[] = []) =>
   items.map((i) => `<label class="chk"><input type="checkbox" data-group="${group}" value="${i}"${on.includes(i) ? " checked" : ""}><span>${label(i)}</span></label>`).join("");
 const resChips = RESOLUTIONS.map((r) => `<label class="chip"><input type="checkbox" data-group="resolutions" value="${r}"><span>${r}</span></label>`).join("");
+const resChipsFor = (group: string) => RESOLUTIONS.map((r) => `<label class="chip"><input type="checkbox" data-group="${group}" value="${r}"><span>${r}</span></label>`).join("");
 const sortRows = SORT_KEYS.map((k) => `<label class="chk"><input type="checkbox" data-group="sort" value="${k}"${DEFAULT_CONFIG.sort.includes(k) ? " checked" : ""}><span>${k}</span></label>`).join("");
 const formatOpts = FORMAT_PRESETS.map((f) => `<option value="${f}"${f === DEFAULT_CONFIG.format ? " selected" : ""}>${label(f)}</option>`).join("");
 const historyOpts = HISTORY_SOURCES.map((h) => `<option value="${h}">${label(h)}</option>`).join("");
@@ -181,6 +182,13 @@ export function renderConfigurePage(baseUrl: string): string {
   </div>
 </section>
 
+<section class="card"><h2>Preferred order</h2>
+  <p class="hint">Soft ranking: matching sources float to the top WITHOUT hiding anything else (e.g. prefer your languages, or HDR over SDR). Takes effect only when "preferred" is one of your sort keys above.</p>
+  <div class="field"><span class="lbl">Preferred resolutions</span><div class="chips">${resChipsFor("preferredResolutions")}</div></div>
+  <div class="field" style="margin-top:14px"><span class="lbl">Preferred languages</span><div class="chips">${langChips("preferredLanguages")}</div></div>
+  <div class="field" style="margin-top:14px"><span class="lbl">Preferred tags</span><div class="chips">${tagChips("preferredTags")}</div></div>
+</section>
+
 <section class="card"><h2>Ratings on posters</h2>
   <p class="hint">Bake IMDb / Rotten Tomatoes / TMDB ratings + quality badges onto poster art.</p>
   <label class="toggle"><input id="ratingsEnabled" type="checkbox"> Enable poster ratings</label>
@@ -217,6 +225,7 @@ export function renderConfigurePage(baseUrl: string): string {
         includeLanguages: vals('includeLanguages'), excludeLanguages: vals('excludeLanguages'),
         minSourceNodes: Math.min(10, Math.max(1, parseInt(document.getElementById('minSourceNodes').value||'1',10)||1)),
         includeKinds: vals('includeKinds'), excludeKinds: vals('excludeKinds'),
+        preferredResolutions: vals('preferredResolutions'), preferredLanguages: vals('preferredLanguages'), preferredTags: vals('preferredTags'),
         maxResults: Math.min(200, Math.max(0, parseInt(document.getElementById('maxResults').value||'0',10)||0)),
         maxPerResolution: Math.min(50, Math.max(0, parseInt(document.getElementById('maxPerResolution').value||'0',10)||0)),
         dedup: document.getElementById('dedup').checked,

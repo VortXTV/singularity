@@ -55,7 +55,7 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
     debridServices: ["torbox", "EVIL!", "realdebrid", "torbox"], // unknown dropped, dupes collapsed, lowercased
     usenetServices: ["easynews", "nope"],
     addons: ["https://ok.example/manifest.json", "ftp://bad", "not a url"],
-    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"], includeLanguages: ["EN", "klingon", "ja"], excludeLanguages: ["es", "bogus"], minSourceNodes: 99, includeKinds: ["torrent", "bogus"], excludeKinds: ["nzb", "dvd"], maxResults: 9999, maxPerResolution: 999 },
+    filters: { minSeeders: -5, maxSizeGB: 9999, excludeRegex: "cam", resolutions: ["2160p", "haxx"], includeTags: ["atmos", "NOPE", "hevc"], excludeTags: ["av1", "junk"], includeLanguages: ["EN", "klingon", "ja"], excludeLanguages: ["es", "bogus"], minSourceNodes: 99, includeKinds: ["torrent", "bogus"], excludeKinds: ["nzb", "dvd"], preferredResolutions: ["1080p", "haxx"], preferredLanguages: ["JA", "nope"], preferredTags: ["hdr10plus", "junk"], maxResults: 9999, maxPerResolution: 999 },
     sort: ["cached", "seeders", "boguskey"],
     format: "custom",
     formatTemplate: "{quality} ".repeat(40), // 400 chars -> capped to 240
@@ -78,6 +78,9 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
   ok(v.filters.minSourceNodes === 10, "clamps minSourceNodes to the 1..10 range");
   ok(v.filters.includeKinds.includes("torrent") && !v.filters.includeKinds.includes("bogus"), "keeps known source kinds, drops unknown");
   ok(v.filters.excludeKinds.includes("nzb") && !v.filters.excludeKinds.includes("dvd"), "keeps known exclude kinds, drops unknown");
+  ok(v.filters.preferredResolutions.includes("1080p") && !v.filters.preferredResolutions.includes("haxx"), "keeps known preferred resolutions, drops unknown");
+  ok(v.filters.preferredLanguages.includes("ja") && !v.filters.preferredLanguages.includes("nope"), "keeps known preferred languages (lowercased), drops unknown");
+  ok(v.filters.preferredTags.includes("hdr10plus") && !v.filters.preferredTags.includes("junk"), "keeps known preferred tags, drops unknown");
   ok(v.format === "custom" && v.formatTemplate.length === 240, "keeps a custom format + caps the template length");
   ok(v.filters.maxResults === 200 && v.filters.maxPerResolution === 50, "clamps result limits to their caps");
   ok(!v.sort.includes("boguskey"), "drops unknown sort key");

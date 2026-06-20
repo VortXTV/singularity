@@ -121,6 +121,10 @@ console.log("configure page + configured manifest");
   ok((m.json?.resources || []).includes("catalog") && (m.json?.catalogs || []).length >= 2, "recommendations config adds the catalog resource + catalogs");
   const cat = await get(`/${cfg}/catalog/movie/singularity.recs.toppicks.movie.json`);
   ok(cat.status === 200 && Array.isArray(cat.json?.metas), "configured catalog responds gracefully (metas array)");
+  // soft preferred-ordering config flows through and never errors (a stream request stays well-formed)
+  const prefCfg = b64url(JSON.stringify({ sort: ["cached", "preferred", "seeders"], filters: { preferredResolutions: ["1080p", "2160p"], preferredLanguages: ["en"], preferredTags: ["hdr"] } }));
+  const ps = await get(`/${prefCfg}/stream/movie/${META}.json`);
+  ok(ps.status === 200 && Array.isArray(ps.json?.streams), "a preferred-ordering config returns a well-formed streams array (soft ranking, nothing excluded)");
 }
 
 console.log("HTTP (3-node gated) + NZB sources");
