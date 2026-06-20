@@ -11,6 +11,7 @@ import {
   sanitizeHttpFact,
   sanitizeNzbFact,
   normalizeInfoHash,
+  reportHashKey,
   sanitizeTags,
   sanitizeLanguages,
   assembleSyncDelta,
@@ -113,6 +114,65 @@ console.log("normalizeInfoHash (base32 btih)");
   ok(b32 !== null && /^[a-f0-9]{40}$/.test(b32.infoHash), "sanitizeContribution accepts a base32 btih and stores it as 40-hex");
   const hexForm = b32 ? normalizeInfoHash("MFRGGZDFMZTWQ2LKNNWG23TPOBYXE43U") : null;
   ok(b32 !== null && b32.infoHash === hexForm, "the stored hex matches the direct normalization (same key -> dedup/trust converge)");
+}
+
+// --- reportHashKey: the report path must NOT base32-decode a 32-hex nzb MD5 (alphabets overlap on [a-f]) ---
+console.log("reportHashKey (nzb-aware)");
+{
+  // A 32-hex MD5 of only [a-f] chars would match the base32 alphabet [a-z2-7] and be mis-decoded by
+  // normalizeInfoHash; reportHashKey keeps it as the 32-hex key the nzb cache fact was stored under.
+  const allAF = "abcdefabcdefabcdefabcdefabcdefab"; // 32 hex, all [a-f] -> also valid base32
+  ok(normalizeInfoHash(allAF) !== allAF, "normalizeInfoHash WOULD mis-decode an all-[a-f] 32-hex MD5 (the latent bug)");
+  ok(reportHashKey(allAF) === allAF, "reportHashKey keeps an all-[a-f] 32-hex nzb MD5 unchanged (the fix)");
+  ok(reportHashKey("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4") === "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "a mixed 32-hex nzb MD5 (with 0/1/8/9) passes through too");
+  ok(reportHashKey("C".repeat(40)) === "c".repeat(40), "a 40-hex torrent btih still normalizes (lowercased)");
+  ok(reportHashKey("MFRGGZDFMZTWQ2LKNNWG23TPOBYXE43U") === normalizeInfoHash("MFRGGZDFMZTWQ2LKNNWG23TPOBYXE43U"), "a base32 torrent btih still decodes to 40-hex on the report path");
+  ok(reportHashKey("nothex!") === null, "garbage -> null");
+}
+
+// --- canonicalQuality: resolution aliases normalized at ingest so resolution sort + maxPerResolution work ---
+console.log("canonicalQuality (ingest)");
+{
+  const mk = (q: string) => sanitizeContribution({ infoHash: "a".repeat(40), quality: q, source: "x" })?.quality;
+  ok(mk("4K") === "2160p", "'4K' canonicalizes to 2160p at ingest");
+  ok(mk("uhd") === "2160p", "'uhd' -> 2160p");
+  ok(mk("FHD") === "1080p", "'FHD' -> 1080p");
+  ok(mk("1080p") === "1080p", "an already-canonical label is unchanged");
+  ok(mk("HDR") === "HDR", "a non-resolution label is left untouched (HDR is a tag concern, not a resolution)");
+  // and the payoff: a 4K source now sorts ABOVE a 720p one (it used to rank as SD)
+  const streams = buildStreamResponse(
+    [
+      { metaId: "tt1", infoHash: "a".repeat(40), quality: "2160p", size: 1e9, source: "x", cachedOn: [], seeders: 5, lastVerified: 1000, trusted: true, tags: [], languages: [] } as any,
+      { metaId: "tt1", infoHash: "b".repeat(40), quality: "720p", size: 1e9, source: "x", cachedOn: [], seeders: 50, lastVerified: 1000, trusted: true, tags: [], languages: [] } as any,
+    ],
+    1000,
+    { sort: ["resolution"] },
+  ).streams;
+  ok(/2160p|4K/i.test(streams[0].title) || streams[0].title.includes("2160"), "resolution sort puts the 2160p source first");
+}
+
+// --- dedup signature includes languages: same release, different audio -> both kept ---
+console.log("dedup languages");
+{
+  const base = { metaId: "tt1", size: 1e9, source: "x", cachedOn: ["realdebrid"], seeders: 0, lastVerified: 1000, trusted: true, quality: "1080p", tags: [] };
+  const out = buildStreamResponse(
+    [
+      { ...base, infoHash: "a".repeat(40), languages: ["en"] } as any,
+      { ...base, infoHash: "b".repeat(40), languages: ["ja"] } as any,
+    ],
+    1000,
+    { dedup: true },
+  ).streams;
+  ok(out.length === 2, "dedup keeps both an EN and a JA copy of the same release (languages are part of the signature)");
+  const out2 = buildStreamResponse(
+    [
+      { ...base, infoHash: "a".repeat(40), languages: ["en"] } as any,
+      { ...base, infoHash: "b".repeat(40), languages: ["en"] } as any,
+    ],
+    1000,
+    { dedup: true },
+  ).streams;
+  ok(out2.length === 1, "dedup still collapses two identical same-language copies");
 }
 
 // --- trust gate: 3 independent nodes OR own debrid ---

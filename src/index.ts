@@ -22,6 +22,7 @@ import {
   sanitizeHttpFact,
   sanitizeNzbFact,
   normalizeInfoHash,
+  reportHashKey,
   isCacheTrusted,
   isFresh,
   isNodeBarred,
@@ -573,26 +574,39 @@ async function handleReport(req: Request, env: Env, ip: string): Promise<Respons
   if (env.RL && !(await env.RL.limit({ key: `report:${ip}` })).success) return json({ error: "rate_limited" }, 429);
   const body = await readJSON(req);
   if (!body) return json({ error: "bad_request" }, 400);
+  const now = Date.now();
   const rawHash = typeof body.infoHash === "string" ? body.infoHash.trim().toLowerCase() : "";
   // A reported torrent btih may arrive base32 - canonicalize it to the 40-hex key the corpus stored it
-  // under; a 32-hex nzb hash falls through unchanged so a report still matches its claim either way.
-  const infoHash = normalizeInfoHash(rawHash) ?? rawHash;
+  // under; a 32-hex nzb hash passes through unchanged (reportHashKey, NOT base32-decoded) so a report still
+  // matches its claim either way.
+  const infoHash = reportHashKey(rawHash) ?? rawHash;
   const service = typeof body.service === "string" ? body.service.toLowerCase() : "";
-  // reporter is a base64url node id (case-sensitive - do NOT lowercase) = base64url(SHA-256(pubkey)[..16]).
-  const reporter = typeof body.reporter === "string" ? body.reporter : "";
-  // reporter must be a real node id that EXISTS, so a report cannot be forged against an arbitrary node id
-  // (anti-griefing). hash is a 40-hex torrent btih OR a 32-hex nzb hash.
-  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(infoHash) || !/^[a-z0-9]{2,24}$/.test(service) || !/^[A-Za-z0-9_-]{22}$/.test(reporter)) {
+  // hash is a 40-hex torrent btih OR a 32-hex nzb hash.
+  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(infoHash) || !/^[a-z0-9]{2,24}$/.test(service)) {
     return json({ error: "bad_request" }, 400);
   }
-  const node = await env.DB.prepare("SELECT 1 AS ok FROM nodes WHERE id = ?").bind(reporter).first<{ ok: number }>();
+  // A report is an Ed25519-signed node action, exactly like a contribution: the reporter must PROVE control
+  // of its key (signature over `${infoHash}.${service}` within the 5-min anti-replay window), so a report
+  // can neither be forged nor attributed to a node the caller does not control. The reporter id is DERIVED
+  // from the verified key - the body never supplies it. (Existence-only was not control: node ids are public
+  // in /hive/sync, and keypairs are free, so any caller could previously report as any registered node.)
+  const pubKey = typeof body.pubKey === "string" ? body.pubKey : "";
+  const ts = typeof body.ts === "number" ? body.ts : NaN;
+  const sig = typeof body.sig === "string" ? body.sig : "";
+  const reporter = await verifyNode(pubKey, ts, `${infoHash}.${service}`, sig, now);
+  if (!reporter) return json({ error: "unauthorized" }, 401);
+  // The reporter must be a registered, NON-BANNED node (so the vindication penalty can land on it if it is
+  // overruled, and a barred node cannot keep griefing via reports).
+  const node = await env.DB.prepare("SELECT 1 AS ok FROM nodes WHERE id = ? AND banned = 0").bind(reporter).first<{ ok: number }>();
   if (!node) return json({ error: "unknown_node" }, 403);
   // Only accept a report against a cache fact that actually exists, so the table can't grow unbounded with
   // reports for arbitrary hash+service pairs.
   const fact = await env.DB.prepare("SELECT 1 AS ok FROM cache_facts WHERE info_hash = ? AND service = ?").bind(infoHash, service).first<{ ok: number }>();
   if (!fact) return json({ error: "no_such_claim" }, 404);
-  await env.DB.prepare("INSERT INTO reports (info_hash, service, reporter, ts) VALUES (?, ?, ?, ?)")
-    .bind(infoHash, service, reporter, Date.now())
+  // INSERT OR IGNORE against the (info_hash, service, reporter) unique index: a reporter counts ONCE per
+  // claim, so a re-signed/replayed report is idempotent and cannot pad the table or the distinct count.
+  await env.DB.prepare("INSERT OR IGNORE INTO reports (info_hash, service, reporter, ts) VALUES (?, ?, ?, ?)")
+    .bind(infoHash, service, reporter, now)
     .run();
 
   // Crowd adjudication: the Worker can't re-check a debrid itself (no keys), so DISTINCT reporters are the
@@ -604,10 +618,13 @@ async function handleReport(req: Request, env: Env, ip: string): Promise<Respons
     .first<{ n: number }>();
   if (reportsExceedThreshold(rc?.n ?? 0)) {
     await env.DB.prepare("UPDATE cache_facts SET cached = 0, confirmations = 0 WHERE info_hash = ? AND service = ?").bind(infoHash, service).run();
+    // Penalize only confirmers whose confirmation is still within the TTL window (i.e. still counts toward
+    // trust at read time) - mirrors the trust-count query in recordCache so the penalty matches the gate,
+    // instead of also hitting nodes whose confirmation expired long ago.
     await env.DB.prepare(
-      "UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT node_id FROM cache_confirmations WHERE info_hash = ? AND service = ?)",
+      "UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT node_id FROM cache_confirmations WHERE info_hash = ? AND service = ? AND ts > ?)",
     )
-      .bind(infoHash, service)
+      .bind(infoHash, service, now - CACHE_TTL_MS)
       .run();
     await env.DB.prepare("UPDATE nodes SET banned = 1 WHERE banned = 0 AND penalties >= ?").bind(PENALTY_BAN_THRESHOLD).run();
     await env.DB.prepare("DELETE FROM cache_confirmations WHERE info_hash = ? AND service = ?").bind(infoHash, service).run();

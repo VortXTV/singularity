@@ -42,6 +42,7 @@ const HEX40 = /^[a-f0-9]{40}$/;
 // the canonical 40-hex form, so a base32 contribution must be decoded on ingest - otherwise the same
 // torrent in each form never converges on the 3-node trust gate or dedup.
 const B32_32 = /^[a-z2-7]{32}$/; // a base32-encoded 20-byte btih, lowercased
+const HEX32 = /^[a-f0-9]{32}$/; // NZB hash (MD5 of the .nzb), distinct length from a 40-hex torrent btih
 const B32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"; // RFC 4648 base32, lowercased
 
 /** Decode a 32-char lowercased base32 btih to its 40-hex form, or null if any char is out of alphabet. */
@@ -74,9 +75,35 @@ export function normalizeInfoHash(raw: unknown): string | null {
   if (B32_32.test(s)) return base32ToHex40(s);
   return null;
 }
+
+/**
+ * Resolve a REPORTED hash to the corpus key it was stored under. A report can target a torrent (40-hex, or
+ * a base32 btih that normalizes to 40-hex) OR an nzb (32-hex MD5). A 32-hex string is an nzb hash, NOT
+ * base32: the base32 alphabet [a-z2-7] contains the hex letters [a-f], so an MD5 of only {2-7,a-f} would
+ * otherwise be mis-decoded by normalizeInfoHash to a bogus 40-hex that no longer matches the 32-hex key the
+ * nzb cache fact was stored under (and the report would be silently dropped as no_such_claim). Torrent-only
+ * normalization stays in normalizeInfoHash; this nzb-aware variant is used only on the report path.
+ */
+export function reportHashKey(raw: unknown): string | null {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (HEX32.test(s)) return s; // nzb MD5 - keep as-is, never base32-decode
+  return normalizeInfoHash(s); // torrent btih: 40-hex passthrough or base32 -> 40-hex
+}
 // Field hygiene: contributed strings are untrusted, so each is constrained to a safe shape (no markup,
 // no control chars, no RTL/homoglyph tricks) before it can enter the corpus and render in a client.
 const QUALITY_RE = /^[0-9a-zA-Z]{1,16}$/; // "2160p", "1080p", "4K", "HDR"
+// Map common resolution aliases to the canonical RES_RANK vocabulary at INGEST, so the resolution sort and
+// the maxPerResolution bucket understand them (resRank only knows 2160p/1080p/720p/480p/SD; a "4K" label
+// would otherwise rank as SD and bucket separately from "2160p"). Non-resolution labels are left untouched.
+const QUALITY_ALIASES: Record<string, string> = {
+  "4k": "2160p", uhd: "2160p", "2160": "2160p", "2160p": "2160p",
+  fhd: "1080p", fullhd: "1080p", "1080": "1080p", "1080p": "1080p",
+  hd: "720p", "720": "720p", "720p": "720p",
+  "480": "480p", "480p": "480p", sd: "SD",
+};
+function canonicalQuality(q: string | null): string | null {
+  return q === null ? null : (QUALITY_ALIASES[q.toLowerCase()] ?? q);
+}
 const SERVICE_RE = /^[a-z0-9]{2,24}$/; // a debrid slug: "realdebrid", "torbox"
 const SOURCE_RE = /^[\w .\-]{1,48}$/; // add-on label: word chars, space, dot, hyphen
 
@@ -180,7 +207,7 @@ export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | 
   if (!hash) return null;
   return {
     infoHash: hash,
-    quality: matchOrNull(raw.quality, QUALITY_RE),
+    quality: canonicalQuality(matchOrNull(raw.quality, QUALITY_RE)),
     size: asInt(raw.size),
     source: matchOrNull(raw.source, SOURCE_RE),
     service: matchOrNull(typeof raw.service === "string" ? raw.service.toLowerCase() : raw.service, SERVICE_RE),
@@ -193,7 +220,6 @@ export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | 
   };
 }
 
-const HEX32 = /^[a-f0-9]{32}$/; // NZB hash (MD5 of the .nzb), distinct length from a 40-hex torrent btih
 // A query-param NAME that marks a URL as user/session-specific (CDN-signed, OAuth, expiring). Tested
 // against the DECODED param name (via URLSearchParams) so %XX obfuscation cannot defeat it. Substring
 // match (e.g. "x-amz-security-token" contains "token", "Key-Pair-Id" contains "key").
@@ -242,7 +268,7 @@ export function sanitizeHttpFact(raw: Record<string, unknown>): CleanHttpFact | 
   if (!isPublicHttpUrl(url)) return null;
   return {
     url: new URL(url).href, // canonicalized (dedupes case/port/encoding variants)
-    quality: matchOrNull(raw.quality, QUALITY_RE),
+    quality: canonicalQuality(matchOrNull(raw.quality, QUALITY_RE)),
     size: asInt(raw.size),
     source: matchOrNull(raw.source, SOURCE_RE),
     tags: sanitizeTags(raw.tags),
@@ -270,7 +296,7 @@ export function sanitizeNzbFact(raw: Record<string, unknown>): CleanNzbFact | nu
   if (!HEX32.test(hash)) return null;
   return {
     nzbHash: hash,
-    quality: matchOrNull(raw.quality, QUALITY_RE),
+    quality: canonicalQuality(matchOrNull(raw.quality, QUALITY_RE)),
     size: asInt(raw.size),
     source: matchOrNull(raw.source, SOURCE_RE),
     service: matchOrNull(typeof raw.service === "string" ? raw.service.toLowerCase() : raw.service, SERVICE_RE),
@@ -757,7 +783,10 @@ export function buildStreamResponse(rows: CorpusStream[], now: number, opts?: St
     shown = shown.filter((s) => {
       const k = kindOf(s);
       if (k === "http") return true;
-      const sig = `${k}|${s.quality ?? ""}|${Math.round((s.size ?? 0) / 5e8)}|${[...(s.tags ?? [])].sort().join("")}`;
+      // Languages are part of the signature: an EN dub and a JA original of the same release share kind/
+      // quality/size/tags but are distinct sources, so collapsing them would drop the only source in a
+      // wanted audio language. Distinct HTTP urls are likewise never collapsed (handled above).
+      const sig = `${k}|${s.quality ?? ""}|${Math.round((s.size ?? 0) / 5e8)}|${[...(s.tags ?? [])].sort().join("")}|${[...(s.languages ?? [])].sort().join(",")}`;
       if (seen.has(sig)) return false;
       seen.add(sig);
       return true;

@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS reports (
   ts        INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reports_hash ON reports (info_hash, service);
+-- One report per (claim, reporter): handleReport INSERTs OR IGNORE so a reporter counts once per claim and
+-- cannot pad the table or the distinct-reporter threshold. Mirrors the composite PK on the *_confirmations tables.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_unique ON reports (info_hash, service, reporter);
 
 -- HTTP / direct stream index: which STABLE PUBLIC stream URL serves a title. Public, tokenless URLs only
 -- (sanitizeHttpFact rejects userinfo + token/session query params at ingest), so these are safe to share

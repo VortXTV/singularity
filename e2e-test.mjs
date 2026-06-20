@@ -294,8 +294,17 @@ console.log("report -> crowd-rejection (anti-poisoning)");
   let row = ((await get(`/stream/movie/${META3}.json`)).json?.streams || []).find((s) => s.infoHash === HASHR);
   ok(row && /Cached/i.test(row.title), "cache fact trusted + surfaced after 3 confirmations");
   for (const n of [n1, n2, n3]) {
-    const reporter = await nodeIdOf(n.pubKey);
-    await fetch(BASE + "/hive/report", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ infoHash: HASHR, service: "realdebrid", reporter }) });
+    // A report is Ed25519-signed (sig over `${ts}.${infoHash}.${service}`); the server derives reporter from
+    // the verified key, so an unsigned or forged report (or one attributed to a key you don't control) fails.
+    const rts = Date.now();
+    const rsig = b64(new Uint8Array(await subtle.sign({ name: "Ed25519" }, n.kp.privateKey, te.encode(`${rts}.${HASHR}.realdebrid`))));
+    await fetch(BASE + "/hive/report", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ infoHash: HASHR, service: "realdebrid", pubKey: n.pubKey, ts: rts, sig: rsig }) });
+  }
+  // An UNSIGNED report (the old shape) is now rejected 401 - the auth gap is closed.
+  {
+    const reporter = await nodeIdOf(n1.pubKey);
+    const r = await fetch(BASE + "/hive/report", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ infoHash: HASHR, service: "realdebrid", reporter }) });
+    ok(r.status === 401, "unsigned /hive/report is rejected 401 (reporter identity must be proven)");
   }
   row = ((await get(`/stream/movie/${META3}.json`)).json?.streams || []).find((s) => s.infoHash === HASHR);
   ok(!row || !/Cached/i.test(row.title), "after 3 distinct reports, the cache claim is demoted (no longer shown cached)");
