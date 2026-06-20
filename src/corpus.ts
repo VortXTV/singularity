@@ -204,6 +204,14 @@ export interface Manifest {
   behaviorHints?: Record<string, unknown>;
 }
 
+// The always-on discovery catalog: the titles the hive-mind currently has the most/freshest sources for.
+// Unique to Singularity (derived from the corpus itself, no user history or key needed). Enriched on read
+// via public Cinemeta. Stremio shows one catalog per type.
+export const TRENDING_CATALOGS = [
+  { type: "movie", id: "singularity.trending", name: "Singularity: Trending" },
+  { type: "series", id: "singularity.trending", name: "Singularity: Trending" },
+];
+
 export function buildManifest(version = "0.1.0"): Manifest {
   return {
     id: "tv.vortx.singularity",
@@ -212,10 +220,10 @@ export function buildManifest(version = "0.1.0"): Manifest {
     description:
       "The VortX source engine. A crowd-verified corpus of torrent + debrid-cache + live-health facts. " +
       "Infohash metadata only - your debrid token never leaves your device.",
-    resources: ["stream"],
+    resources: ["stream", "catalog"],
     types: ["movie", "series"],
     idPrefixes: ["tt"],
-    catalogs: [],
+    catalogs: TRENDING_CATALOGS,
     behaviorHints: { configurable: false, configurationRequired: false },
   };
 }

@@ -422,10 +422,37 @@ function handleConfiguredManifest(req: Request, cfg: string): Response {
   if (!config) return json({ error: "bad_config" }, 400);
   return json(buildConfiguredManifest(config, new URL(req.url).origin), 200, true);
 }
-// Recommendation catalogs. The taste-profile engine is a later phase; respond gracefully
-// with an empty set so a configured client never errors while it is being built.
-function handleCatalog(_cfg: string, _type: string, _id: string): Response {
-  return json({ metas: [] }, 200, true);
+// Enrich an imdb id into a Stremio meta via PUBLIC Cinemeta (no key). Best-effort: a failure yields a bare
+// meta so the catalog still renders. Cached at the edge for an hour.
+async function cinemetaMeta(type: string, imdb: string): Promise<{ id: string; type: string; name: string; poster?: string }> {
+  const bare = { id: imdb, type, name: imdb };
+  try {
+    const r = await fetch(`https://v3-cinemeta.strem.io/meta/${type}/${imdb}.json`, { cf: { cacheTtl: 3600, cacheEverything: true } } as RequestInit);
+    if (!r.ok) return bare;
+    const j = (await r.json()) as { meta?: { id: string; name: string; poster?: string } };
+    return j?.meta ? { id: j.meta.id, type, name: j.meta.name, poster: j.meta.poster } : bare;
+  } catch {
+    return bare;
+  }
+}
+
+// Catalogs. The always-on "Singularity: Trending" catalog is derived from the corpus itself (titles with
+// the most/freshest sources) - no user history or key needed; recommendation catalogs are a later phase
+// (respond empty so a client never errors). The id may carry a .json suffix and Stremio "extra" segments.
+async function handleCatalog(env: Env, type: string, idRaw: string): Promise<Response> {
+  const id = idRaw.split("/")[0].replace(/\.json$/, "");
+  if (id !== "singularity.trending" || (type !== "movie" && type !== "series")) return json({ metas: [] }, 200, true);
+  // Top titles by source count. Movies key on the bare imdb id; series collapse the episode meta_id to its
+  // imdb prefix so a whole show ranks once.
+  const sql =
+    type === "movie"
+      ? "SELECT meta_id AS imdb, COUNT(*) AS c FROM torrents WHERE meta_id NOT LIKE '%:%' GROUP BY meta_id ORDER BY c DESC, MAX(added_at) DESC LIMIT 20"
+      : "SELECT substr(meta_id, 1, instr(meta_id, ':') - 1) AS imdb, COUNT(*) AS c FROM torrents WHERE meta_id LIKE '%:%' GROUP BY imdb ORDER BY c DESC, MAX(added_at) DESC LIMIT 20";
+  const rows = (await env.DB.prepare(sql).all<{ imdb: string; c: number }>()).results ?? [];
+  const imdbIds = rows.map((r) => r.imdb).filter((x) => /^tt\d+$/.test(x));
+  if (imdbIds.length === 0) return json({ metas: [] }, 200, true);
+  const metas = await Promise.all(imdbIds.map((imdb) => cinemetaMeta(type, imdb)));
+  return json({ metas }, 200, true);
 }
 
 export default {
@@ -447,7 +474,9 @@ export default {
     const cs = path.match(/^\/([A-Za-z0-9_-]+)\/stream\/([^/]+)\/(.+)$/);
     if (req.method === "GET" && cs) return handleStream(env, decodeURIComponent(cs[2]), decodeURIComponent(cs[3]), decodeConfig(cs[1]) ?? undefined);
     const cc = path.match(/^\/([A-Za-z0-9_-]+)\/catalog\/([^/]+)\/(.+)$/);
-    if (req.method === "GET" && cc) return handleCatalog(cc[1], decodeURIComponent(cc[2]), decodeURIComponent(cc[3]));
+    if (req.method === "GET" && cc) return handleCatalog(env, decodeURIComponent(cc[2]), decodeURIComponent(cc[3]));
+    const cat = path.match(/^\/catalog\/([^/]+)\/(.+)$/);
+    if (req.method === "GET" && cat) return handleCatalog(env, decodeURIComponent(cat[1]), decodeURIComponent(cat[2]));
 
     const sm = path.match(/^\/stream\/([^/]+)\/(.+)$/);
     if (req.method === "GET" && sm) return handleStream(env, decodeURIComponent(sm[1]), decodeURIComponent(sm[2]));

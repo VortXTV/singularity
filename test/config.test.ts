@@ -80,14 +80,15 @@ console.log("validateConfig hygiene (no secrets, normalize, clamp)");
 
 console.log("configuredResources + catalogs");
 {
-  ok(JSON.stringify(configuredResources(DEFAULT_CONFIG)) === JSON.stringify(["stream"]), "default = stream only");
+  ok(JSON.stringify(configuredResources(DEFAULT_CONFIG)) === JSON.stringify(["stream", "catalog"]), "default = stream + catalog (Trending is always on)");
   const withRecs = validateConfig({ ...DEFAULT_CONFIG, recommendations: { enabled: true, historySource: "library" } });
-  ok(configuredResources(withRecs).includes("catalog"), "recommendations add the catalog resource");
+  ok(configuredResources(withRecs).includes("catalog"), "catalog resource present with recommendations");
   const withRatings = validateConfig({ ...DEFAULT_CONFIG, ratings: { enabled: true, instance: "https://r.example" } });
   ok(configuredResources(withRatings).includes("meta"), "ratings add the meta resource");
   const cats = configuredCatalogs(withRecs);
   ok(cats.length >= 2 && cats.some((c) => /Top Picks/i.test(c.name)), "recommendations yield catalogs incl. Top Picks");
-  ok(configuredCatalogs(DEFAULT_CONFIG).length === 0, "no catalogs when recommendations off");
+  const dflt = configuredCatalogs(DEFAULT_CONFIG);
+  ok(dflt.length === 2 && dflt.some((c) => /Trending/i.test(c.name)), "the Trending catalog is always present (even with recommendations off)");
 }
 
 console.log("buildConfiguredManifest");

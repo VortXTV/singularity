@@ -46,6 +46,9 @@ console.log("health + manifest");
   const m = await get("/manifest.json");
   ok(m.status === 200 && m.json?.resources?.includes("stream"), "GET /manifest.json declares stream");
   ok(m.json?.types?.includes("movie") && m.json?.idPrefixes?.includes("tt"), "manifest movie + tt prefix");
+  ok(m.json?.resources?.includes("catalog") && (m.json?.catalogs || []).some((c) => /trending/i.test(c.id)), "manifest declares the always-on Trending catalog");
+  const cat = await get("/catalog/movie/singularity.trending.json");
+  ok(cat.status === 200 && Array.isArray(cat.json?.metas), "GET /catalog/movie/singularity.trending returns a metas array");
 }
 
 console.log("empty corpus");

@@ -37,7 +37,8 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/:config/manifest.json` | none | Configured manifest; resources + catalogs reflect your config |
 | GET | `/stream/:type/:id.json` | none | Corpus sources for a title as Stremio streams (trusted + fresh, cached-first, infohash-only) |
 | GET | `/:config/stream/:type/:id.json` | none | Same, filtered by your config (e.g. cache status only for your debrid services) |
-| GET | `/:config/catalog/:type/:id.json` | none | Recommendation rows (engine WIP - responds gracefully today) |
+| GET | `/catalog/:type/singularity.trending.json` | none | The always-on Trending catalog (titles the corpus has the most sources for, enriched via public Cinemeta) |
+| GET | `/:config/catalog/:type/:id.json` | none | Trending (live) + recommendation rows (recs engine WIP - responds gracefully) |
 | POST | `/hive/contribute` | Ed25519 sig | A node submits signed facts (torrent index + cache booleans + seeders) |
 | POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" report (seam for the penalty system) |
 | GET | `/health` | none | Service status |

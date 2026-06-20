@@ -10,7 +10,7 @@
  * Config travels in the add-on URL path: GET /:config/manifest.json, /:config/stream/..., /:config/
  * catalog/... where :config = base64url(JSON(SingularityConfig)).
  */
-import { buildManifest, KNOWN_TAGS_LIST, type Manifest } from "./corpus.ts";
+import { buildManifest, KNOWN_TAGS_LIST, TRENDING_CATALOGS, type Manifest } from "./corpus.ts";
 
 // Debrid services the user can plug their own account into (keys live in the VortX account, never here).
 export const DEBRID_SERVICES = [
@@ -153,10 +153,9 @@ export function decodeConfig(s: string): SingularityConfig | null {
   }
 }
 
-/** Which Stremio resources this config exposes: stream always; +catalog (recommendations); +meta (ratings). */
+/** Which Stremio resources this config exposes: stream + catalog (trending is always on) always; +meta (ratings). */
 export function configuredResources(c: SingularityConfig): string[] {
-  const r = ["stream"];
-  if (c.recommendations.enabled) r.push("catalog");
+  const r = ["stream", "catalog"]; // catalog is always present (the always-on Trending catalog)
   if (c.ratings.enabled) r.push("meta");
   return r;
 }
@@ -166,10 +165,10 @@ export interface ConfiguredCatalog {
   id: string;
   name: string;
 }
-/** Personalized recommendation catalogs built from the chosen history source. */
+/** The always-on Trending catalog, plus personalized recommendation catalogs when enabled. */
 export function configuredCatalogs(c: SingularityConfig): ConfiguredCatalog[] {
-  if (!c.recommendations.enabled) return [];
-  const out: ConfiguredCatalog[] = [];
+  const out: ConfiguredCatalog[] = [...TRENDING_CATALOGS];
+  if (!c.recommendations.enabled) return out;
   for (const type of ["movie", "series"]) {
     out.push({ type, id: `singularity.recs.toppicks.${type}`, name: "Top Picks for You" });
     out.push({ type, id: `singularity.recs.becausewatched.${type}`, name: "Because You Watched" });
