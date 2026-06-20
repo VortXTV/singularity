@@ -57,7 +57,8 @@ URL path (`/:config/...`). It exposes the full feature surface:
   same facts-not-tokens line as the corpus). `validateConfig` is a strict whitelist that drops anything
   secret-looking.
 - **Your add-ons** to aggregate (bring any manifest URLs), **Filters** (resolutions, min-seeders, max-size,
-  HDR-only, exclude-CAM, exclude regex), **Sort** keys, **Format** preset, **Proxy** toggle.
+  HDR-only, exclude-CAM, exclude regex, per-tag include/exclude, **audio-language include/exclude**), **Sort**
+  keys, **Format** preset, **Proxy** toggle.
 - **Ratings on posters** - bake IMDb / Rotten Tomatoes / TMDB ratings + quality badges onto poster art
   (adds the `meta` resource).
 - **Recommendations** - personalized "Top Picks for You" / "Because You Watched" catalogs from your taste

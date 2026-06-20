@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS torrents (
   source    TEXT,                               -- the contributing add-on's own name
   file_idx  INTEGER,                            -- file index within a multi-file torrent (Stremio fileIdx)
   tags      TEXT,                               -- comma-joined normalized release tags (hdr,dv,atmos,hevc,cam,...)
+  languages TEXT,                               -- comma-joined audio-language slugs (en,es,fr,...,multi,dual)
   added_at  INTEGER NOT NULL,                   -- last-seen (touched on re-contribution)
   PRIMARY KEY (info_hash, meta_id)
 );
@@ -104,6 +105,7 @@ CREATE TABLE IF NOT EXISTS http_streams (
   size          INTEGER,
   source        TEXT,
   tags          TEXT,                             -- comma-joined normalized release tags
+  languages     TEXT,                             -- comma-joined audio-language slugs
   confirmations INTEGER NOT NULL DEFAULT 0,        -- distinct non-barred nodes that contributed this URL
   added_at      INTEGER NOT NULL,
   PRIMARY KEY (url, meta_id)
@@ -130,6 +132,7 @@ CREATE TABLE IF NOT EXISTS nzbs (
   size     INTEGER,
   source   TEXT,
   tags     TEXT,                                   -- comma-joined normalized release tags
+  languages TEXT,                                  -- comma-joined audio-language slugs
   added_at INTEGER NOT NULL,
   PRIMARY KEY (nzb_hash, meta_id)
 );

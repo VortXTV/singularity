@@ -14,6 +14,16 @@ const TAG_CHOICES = ["hdr", "dv", "hdr10plus", "hlg", "10bit", "imax", "remux", 
 const tagChips = (group: string) =>
   TAG_CHOICES.map((t) => `<label class="chip"><input type="checkbox" data-group="${group}" value="${t}"><span>${t.toUpperCase()}</span></label>`).join("");
 
+// Curated audio-language choices: [slug, display]. Slugs match KNOWN_LANGUAGES_LIST in corpus.ts.
+const LANG_CHOICES: Array<[string, string]> = [
+  ["en", "English"], ["es", "Spanish"], ["fr", "French"], ["de", "German"], ["it", "Italian"],
+  ["pt", "Portuguese"], ["ru", "Russian"], ["hi", "Hindi"], ["ja", "Japanese"], ["ko", "Korean"],
+  ["zh", "Chinese"], ["ar", "Arabic"], ["ta", "Tamil"], ["te", "Telugu"], ["nl", "Dutch"],
+  ["pl", "Polish"], ["tr", "Turkish"], ["multi", "Multi"], ["dual", "Dual"],
+];
+const langChips = (group: string) =>
+  LANG_CHOICES.map(([s, d]) => `<label class="chip"><input type="checkbox" data-group="${group}" value="${s}"><span>${d}</span></label>`).join("");
+
 const LABELS: Record<string, string> = {
   realdebrid: "Real-Debrid", alldebrid: "AllDebrid", premiumize: "Premiumize", debridlink: "Debrid-Link",
   torbox: "TorBox", offcloud: "Offcloud", putio: "put.io", easydebrid: "EasyDebrid", debrider: "Debrider",
@@ -133,6 +143,12 @@ export function renderConfigurePage(baseUrl: string): string {
   <div class="field" style="margin-top:14px"><span class="lbl">Exclude</span><div class="chips">${tagChips("excludeTags")}</div></div>
 </section>
 
+<section class="card"><h2>Languages</h2>
+  <p class="hint">Filter by audio language. Include keeps your languages (sources with no language tag stay visible); Exclude drops anything in that language.</p>
+  <div class="field"><span class="lbl">Include (any of)</span><div class="chips">${langChips("includeLanguages")}</div></div>
+  <div class="field" style="margin-top:14px"><span class="lbl">Exclude</span><div class="chips">${langChips("excludeLanguages")}</div></div>
+</section>
+
 <section class="card"><h2>Sort &amp; format</h2>
   <p class="hint">Rank order (strongest first) and how each result reads.</p>
   <div class="field"><span class="lbl">Sort keys</span><div class="grid">${sortRows}</div></div>
@@ -182,6 +198,7 @@ export function renderConfigurePage(baseUrl: string): string {
         maxSizeGB: Math.min(200, Math.max(0, parseInt(document.getElementById('maxSizeGB').value||'100',10)||100)),
         hdrOnly: document.getElementById('hdrOnly').checked, excludeCam: document.getElementById('excludeCam').checked,
         includeTags: vals('includeTags'), excludeTags: vals('excludeTags'),
+        includeLanguages: vals('includeLanguages'), excludeLanguages: vals('excludeLanguages'),
         maxResults: Math.min(200, Math.max(0, parseInt(document.getElementById('maxResults').value||'0',10)||0)),
         maxPerResolution: Math.min(50, Math.max(0, parseInt(document.getElementById('maxPerResolution').value||'0',10)||0)),
         dedup: document.getElementById('dedup').checked,

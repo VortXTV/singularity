@@ -32,6 +32,7 @@ export interface CleanFact {
   seeders: number | null;
   fileIdx: number | null;
   tags: string[];
+  languages: string[];
 }
 
 const HEX40 = /^[a-f0-9]{40}$/;
@@ -109,6 +110,28 @@ export function sanitizeTags(v: unknown): string[] {
   return out;
 }
 
+// Audio-language vocabulary as ISO 639-1 slugs (+ "multi"/"dual" for multi-/dual-audio releases).
+// Contributors send these canonical slugs; the include/exclude language filters read from this set.
+// A closed allowlist keeps the field a safe slug list (no markup, no free text) like the tag layer.
+export const KNOWN_LANGUAGES_LIST = [
+  "en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh", "hi", "ar", "nl", "sv", "no", "da",
+  "fi", "pl", "tr", "th", "vi", "id", "he", "cs", "el", "hu", "ro", "uk", "fa", "ta", "te", "ml",
+  "bn", "mr", "pa", "multi", "dual",
+];
+const KNOWN_LANGUAGES = new Set(KNOWN_LANGUAGES_LIST);
+const MAX_LANGUAGES = 12;
+
+/** Keep only known language slugs, lowercased + de-duped (max MAX_LANGUAGES). Untrusted input -> safe list. */
+export function sanitizeLanguages(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const x of v) {
+    const s = typeof x === "string" ? x.toLowerCase().replace(/[^a-z]/g, "") : "";
+    if (KNOWN_LANGUAGES.has(s) && !out.includes(s) && out.length < MAX_LANGUAGES) out.push(s);
+  }
+  return out;
+}
+
 /**
  * Reduce an untrusted contribution to infohash-only facts, or null if it is not a usable fact.
  * Whitelist semantics: we read only the known fact fields and copy nothing else, so a token or
@@ -127,6 +150,7 @@ export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | 
     seeders: asInt(raw.seeders),
     fileIdx: asInt(raw.fileIdx),
     tags: sanitizeTags(raw.tags),
+    languages: sanitizeLanguages(raw.languages),
   };
 }
 
@@ -162,6 +186,7 @@ export interface CleanHttpFact {
   size: number | null;
   source: string | null;
   tags: string[];
+  languages: string[];
 }
 /**
  * Reduce an HTTP/direct contribution to a STABLE PUBLIC stream fact, or null. The federation rule is
@@ -182,6 +207,7 @@ export function sanitizeHttpFact(raw: Record<string, unknown>): CleanHttpFact | 
     size: asInt(raw.size),
     source: matchOrNull(raw.source, SOURCE_RE),
     tags: sanitizeTags(raw.tags),
+    languages: sanitizeLanguages(raw.languages),
   };
 }
 
@@ -193,6 +219,7 @@ export interface CleanNzbFact {
   service: string | null;
   cached: boolean;
   tags: string[];
+  languages: string[];
 }
 /**
  * Reduce an NZB/Usenet contribution to facts, or null. We store the nzb hash + which usenet service has
@@ -210,6 +237,7 @@ export function sanitizeNzbFact(raw: Record<string, unknown>): CleanNzbFact | nu
     service: matchOrNull(typeof raw.service === "string" ? raw.service.toLowerCase() : raw.service, SERVICE_RE),
     cached: raw.cached === true,
     tags: sanitizeTags(raw.tags),
+    languages: sanitizeLanguages(raw.languages),
   };
 }
 
@@ -310,6 +338,7 @@ export interface CorpusStream {
   lastVerified: number; // epoch ms of the freshest fact backing this row
   fileIdx?: number | null;
   tags?: string[]; // normalized release tags (hdr/dv/atmos/hevc/cam/...)
+  languages?: string[]; // audio-language slugs (en/es/fr/.../multi/dual)
 }
 
 // A Stremio stream object. A torrent carries `infoHash` (the client mints the magnet / resolves debrid
@@ -379,6 +408,8 @@ export interface StreamFilterOptions {
   excludeCam?: boolean; // drop CAM/TS-tagged sources
   includeTags?: string[]; // keep only sources carrying AT LEAST ONE of these tags
   excludeTags?: string[]; // drop sources carrying ANY of these tags
+  includeLanguages?: string[]; // keep only sources carrying AT LEAST ONE of these audio languages
+  excludeLanguages?: string[]; // drop sources carrying ANY of these audio languages
   sort?: string[]; // ordered keys: cached | resolution | seeders | size
   maxResults?: number; // cap the total returned (0/undefined = unlimited)
   maxPerResolution?: number; // cap how many of each resolution (0/undefined = unlimited)
@@ -408,6 +439,12 @@ function applyFilters(streams: CorpusStream[], opts: StreamFilterOptions): Corpu
     if (opts.excludeCam && (s.tags ?? []).some((t) => CAM_TAGS.has(t))) return false;
     if (opts.includeTags && opts.includeTags.length > 0 && !(s.tags ?? []).some((t) => opts.includeTags!.includes(t))) return false;
     if (opts.excludeTags && opts.excludeTags.length > 0 && (s.tags ?? []).some((t) => opts.excludeTags!.includes(t))) return false;
+    // Language filters. excludeLanguages is STRICT (drop anything carrying an excluded language).
+    // includeLanguages is LENIENT: keep a source that matches OR declares no language, so untagged
+    // sources are never silently hidden - we only filter out sources KNOWN to be in another language.
+    const langs = s.languages ?? [];
+    if (opts.excludeLanguages && opts.excludeLanguages.length > 0 && langs.some((l) => opts.excludeLanguages!.includes(l))) return false;
+    if (opts.includeLanguages && opts.includeLanguages.length > 0 && langs.length > 0 && !langs.some((l) => opts.includeLanguages!.includes(l))) return false;
     return true;
   });
 }
@@ -510,22 +547,22 @@ const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v)
 export interface SyncDelta {
   since: number;
   cursor: number; // max timestamp seen; the node re-requests from here next
-  torrents: Array<{ infoHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; fileIdx: unknown; tags: unknown; addedAt: unknown }>;
+  torrents: Array<{ infoHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; fileIdx: unknown; tags: unknown; languages: unknown; addedAt: unknown }>;
   cache: Array<{ infoHash: unknown; service: unknown; cached: unknown; confirmations: unknown; lastVerified: unknown }>;
   health: Array<{ infoHash: unknown; seeders: unknown; lastSeen: unknown }>;
-  http: Array<{ url: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; addedAt: unknown }>;
-  nzb: Array<{ nzbHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; addedAt: unknown }>;
+  http: Array<{ url: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; languages: unknown; addedAt: unknown }>;
+  nzb: Array<{ nzbHash: unknown; metaId: unknown; quality: unknown; size: unknown; source: unknown; tags: unknown; languages: unknown; addedAt: unknown }>;
 }
 
 export function assembleSyncDelta(
   parts: { torrents: Row[]; cache: Row[]; health: Row[]; http: Row[]; nzb: Row[] },
   since: number,
 ): SyncDelta {
-  const torrents = parts.torrents.map((r) => ({ infoHash: r.info_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, fileIdx: r.file_idx, tags: r.tags, addedAt: r.added_at }));
+  const torrents = parts.torrents.map((r) => ({ infoHash: r.info_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, fileIdx: r.file_idx, tags: r.tags, languages: r.languages, addedAt: r.added_at }));
   const cache = parts.cache.map((r) => ({ infoHash: r.info_hash, service: r.service, cached: r.cached, confirmations: r.confirmations, lastVerified: r.last_verified }));
   const health = parts.health.map((r) => ({ infoHash: r.info_hash, seeders: r.seeders, lastSeen: r.last_seen }));
-  const http = parts.http.map((r) => ({ url: r.url, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, addedAt: r.added_at }));
-  const nzb = parts.nzb.map((r) => ({ nzbHash: r.nzb_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, addedAt: r.added_at }));
+  const http = parts.http.map((r) => ({ url: r.url, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, languages: r.languages, addedAt: r.added_at }));
+  const nzb = parts.nzb.map((r) => ({ nzbHash: r.nzb_hash, metaId: r.meta_id, quality: r.quality, size: r.size, source: r.source, tags: r.tags, languages: r.languages, addedAt: r.added_at }));
   const ts = [
     ...parts.torrents.map((r) => num(r.added_at)),
     ...parts.cache.map((r) => num(r.last_verified)),

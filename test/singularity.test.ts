@@ -12,6 +12,7 @@ import {
   sanitizeNzbFact,
   normalizeInfoHash,
   sanitizeTags,
+  sanitizeLanguages,
   assembleSyncDelta,
   buildLeaderboard,
   isCacheTrusted,
@@ -328,6 +329,26 @@ console.log("includeTags / excludeTags filters");
   ok(r.streams.length === 1 && r.streams[0].infoHash === A, "includeTags keeps only streams carrying an included tag");
   r = buildStreamResponse(rows, now, { excludeTags: ["av1"] });
   ok(!r.streams.some((s) => s.infoHash === B) && r.streams.some((s) => s.infoHash === A) && r.streams.some((s) => s.infoHash === C), "excludeTags drops streams carrying an excluded tag");
+}
+
+console.log("sanitizeLanguages + language filters");
+{
+  ok(JSON.stringify(sanitizeLanguages(["EN", "es", "Fr", "klingon", "multi"])) === JSON.stringify(["en", "es", "fr", "multi"]), "keeps known languages lowercased, drops unknown");
+  ok(JSON.stringify(sanitizeLanguages(["en", "en", "de"])) === JSON.stringify(["en", "de"]), "dedupes languages");
+  ok(sanitizeLanguages("nope").length === 0, "non-array -> empty");
+  const c = sanitizeContribution({ infoHash: "a".repeat(40), languages: ["en", "ja"] });
+  ok(!!c && Array.isArray(c.languages) && c.languages.includes("en") && c.languages.includes("ja"), "sanitizeContribution carries languages");
+
+  const now = 7_500_000_000_000;
+  const base = (over) => ({ kind: "torrent", infoHash: "0".repeat(40), quality: "2160p", size: 2e10, source: "x", seeders: 50, cachedOn: [], trusted: true, lastVerified: now - 1000, ...over });
+  const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40);
+  const rows = [base({ infoHash: A, languages: ["en"] }), base({ infoHash: B, languages: ["es", "fr"] }), base({ infoHash: C, languages: [] })];
+  // includeLanguages is LENIENT: keep matches AND untagged sources, drop only those KNOWN to be other languages.
+  let r = buildStreamResponse(rows, now, { includeLanguages: ["en"] });
+  ok(r.streams.some((s) => s.infoHash === A) && r.streams.some((s) => s.infoHash === C) && !r.streams.some((s) => s.infoHash === B), "includeLanguages keeps matches + untagged, drops known-other-language");
+  // excludeLanguages is STRICT: drop any source declaring an excluded language.
+  r = buildStreamResponse(rows, now, { excludeLanguages: ["es"] });
+  ok(!r.streams.some((s) => s.infoHash === B) && r.streams.some((s) => s.infoHash === A) && r.streams.some((s) => s.infoHash === C), "excludeLanguages drops sources in an excluded language, keeps others");
 }
 
 // --- result limits (cap total + per-resolution, applied after sort so the best survive) ---

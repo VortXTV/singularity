@@ -145,20 +145,20 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
   // The corpus serves three kinds for a title: torrents, direct/HTTP public streams, and NZB/Usenet.
   // (LIMITs keep the cache IN-clause below D1's 100 bound-parameter cap: 50 torrent + 30 nzb hashes = 80.)
   const torrents = (
-    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, tags, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
+    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, tags, languages, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
       .bind(metaId)
-      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; added_at: number }>()
+      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; added_at: number }>()
   ).results ?? [];
   const httpRows = (
     // Only HTTP URLs confirmed by >= MIN_CONFIRMATIONS distinct nodes are surfaced (gated like the cache).
-    await env.DB.prepare("SELECT url, quality, size, source, tags, added_at FROM http_streams WHERE meta_id = ? AND confirmations >= ? LIMIT 30")
+    await env.DB.prepare("SELECT url, quality, size, source, tags, languages, added_at FROM http_streams WHERE meta_id = ? AND confirmations >= ? LIMIT 30")
       .bind(metaId, MIN_CONFIRMATIONS)
-      .all<{ url: string; quality: string | null; size: number | null; source: string | null; tags: string | null; added_at: number }>()
+      .all<{ url: string; quality: string | null; size: number | null; source: string | null; tags: string | null; languages: string | null; added_at: number }>()
   ).results ?? [];
   const nzbRows = (
-    await env.DB.prepare("SELECT nzb_hash, quality, size, source, tags, added_at FROM nzbs WHERE meta_id = ? LIMIT 30")
+    await env.DB.prepare("SELECT nzb_hash, quality, size, source, tags, languages, added_at FROM nzbs WHERE meta_id = ? LIMIT 30")
       .bind(metaId)
-      .all<{ nzb_hash: string; quality: string | null; size: number | null; source: string | null; tags: string | null; added_at: number }>()
+      .all<{ nzb_hash: string; quality: string | null; size: number | null; source: string | null; tags: string | null; languages: string | null; added_at: number }>()
   ).results ?? [];
   if (torrents.length === 0 && httpRows.length === 0 && nzbRows.length === 0) return json({ streams: [] }, 200, true);
 
@@ -213,13 +213,14 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
       lastVerified: Math.max(r.added_at, h?.last_seen ?? 0),
       fileIdx: r.file_idx,
       tags: r.tags ? r.tags.split(",") : [],
+      languages: r.languages ? r.languages.split(",") : [],
     });
   }
   for (const r of httpRows) {
-    corpus.push({ kind: "http", url: r.url, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: [], trusted: true, lastVerified: r.added_at, tags: r.tags ? r.tags.split(",") : [] });
+    corpus.push({ kind: "http", url: r.url, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: [], trusted: true, lastVerified: r.added_at, tags: r.tags ? r.tags.split(",") : [], languages: r.languages ? r.languages.split(",") : [] });
   }
   for (const r of nzbRows) {
-    corpus.push({ kind: "nzb", nzbHash: r.nzb_hash, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: (cacheByHash.get(r.nzb_hash) ?? []).filter(allowUsenet), trusted: true, lastVerified: r.added_at, tags: r.tags ? r.tags.split(",") : [] });
+    corpus.push({ kind: "nzb", nzbHash: r.nzb_hash, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: (cacheByHash.get(r.nzb_hash) ?? []).filter(allowUsenet), trusted: true, lastVerified: r.added_at, tags: r.tags ? r.tags.split(",") : [], languages: r.languages ? r.languages.split(",") : [] });
   }
 
   const opts = config
@@ -232,6 +233,8 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
         excludeCam: config.filters.excludeCam,
         includeTags: config.filters.includeTags,
         excludeTags: config.filters.excludeTags,
+        includeLanguages: config.filters.includeLanguages,
+        excludeLanguages: config.filters.excludeLanguages,
         maxResults: config.filters.maxResults,
         maxPerResolution: config.filters.maxPerResolution,
         dedup: config.filters.dedup,
@@ -331,12 +334,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
       const hf = sanitizeHttpFact(raw);
       if (!hf) continue;
       await env.DB.prepare(
-        "INSERT INTO http_streams (url, meta_id, quality, size, source, tags, confirmations, added_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?) " +
+        "INSERT INTO http_streams (url, meta_id, quality, size, source, tags, languages, confirmations, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?) " +
           "ON CONFLICT(url, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, http_streams.quality), " +
           "size = COALESCE(excluded.size, http_streams.size), source = COALESCE(excluded.source, http_streams.source), " +
-          "tags = COALESCE(excluded.tags, http_streams.tags), added_at = excluded.added_at",
+          "tags = COALESCE(excluded.tags, http_streams.tags), languages = COALESCE(excluded.languages, http_streams.languages), added_at = excluded.added_at",
       )
-        .bind(hf.url, metaId, hf.quality, hf.size, hf.source, hf.tags.length ? hf.tags.join(",") : null, now)
+        .bind(hf.url, metaId, hf.quality, hf.size, hf.source, hf.tags.length ? hf.tags.join(",") : null, hf.languages.length ? hf.languages.join(",") : null, now)
         .run();
       await recordHttpConfirmation(env, hf.url, metaId, nodeId, now);
       accepted++;
@@ -348,12 +351,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
       const nf = sanitizeNzbFact(raw);
       if (!nf) continue;
       await env.DB.prepare(
-        "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, tags, added_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+        "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, tags, languages, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT(nzb_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, nzbs.quality), " +
           "size = COALESCE(excluded.size, nzbs.size), source = COALESCE(excluded.source, nzbs.source), " +
-          "tags = COALESCE(excluded.tags, nzbs.tags), added_at = excluded.added_at",
+          "tags = COALESCE(excluded.tags, nzbs.tags), languages = COALESCE(excluded.languages, nzbs.languages), added_at = excluded.added_at",
       )
-        .bind(nf.nzbHash, metaId, nf.quality, nf.size, nf.source, nf.tags.length ? nf.tags.join(",") : null, now)
+        .bind(nf.nzbHash, metaId, nf.quality, nf.size, nf.source, nf.tags.length ? nf.tags.join(",") : null, nf.languages.length ? nf.languages.join(",") : null, now)
         .run();
       if (nf.service && nf.cached) await recordCache(env, nf.nzbHash, nf.service, nodeId, now);
       accepted++;
@@ -365,12 +368,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     if (!clean) continue;
     // 1) torrent association (infohash serves this title)
     await env.DB.prepare(
-      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, languages, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(info_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, torrents.quality), " +
         "size = COALESCE(excluded.size, torrents.size), source = COALESCE(excluded.source, torrents.source), " +
-        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), added_at = excluded.added_at",
+        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), added_at = excluded.added_at",
     )
-      .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, now)
+      .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, clean.languages.length ? clean.languages.join(",") : null, now)
       .run();
     // 2) live swarm health (re-scraped each time; freshest wins)
     if (clean.seeders != null) {
@@ -492,11 +495,11 @@ async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
   type Row = Record<string, unknown>;
   const q = (sql: string) => env.DB.prepare(sql).bind(since, limit).all<Row>();
   const [torrents, cache, health, http, nzb] = await Promise.all([
-    q("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, added_at FROM torrents WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
+    q("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, added_at FROM torrents WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
     q("SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE last_verified > ? ORDER BY last_verified ASC LIMIT ?"),
     q("SELECT info_hash, seeders, last_seen FROM health WHERE last_seen > ? ORDER BY last_seen ASC LIMIT ?"),
-    q("SELECT url, meta_id, quality, size, source, tags, added_at FROM http_streams WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
-    q("SELECT nzb_hash, meta_id, quality, size, source, tags, added_at FROM nzbs WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
+    q("SELECT url, meta_id, quality, size, source, tags, languages, added_at FROM http_streams WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
+    q("SELECT nzb_hash, meta_id, quality, size, source, tags, languages, added_at FROM nzbs WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
   ]);
   const delta = assembleSyncDelta(
     { torrents: torrents.results ?? [], cache: cache.results ?? [], health: health.results ?? [], http: http.results ?? [], nzb: nzb.results ?? [] },

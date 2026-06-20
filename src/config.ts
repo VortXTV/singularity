@@ -10,7 +10,7 @@
  * Config travels in the add-on URL path: GET /:config/manifest.json, /:config/stream/..., /:config/
  * catalog/... where :config = base64url(JSON(SingularityConfig)).
  */
-import { buildManifest, KNOWN_TAGS_LIST, TRENDING_CATALOGS, type Manifest } from "./corpus.ts";
+import { buildManifest, KNOWN_TAGS_LIST, KNOWN_LANGUAGES_LIST, TRENDING_CATALOGS, type Manifest } from "./corpus.ts";
 
 // Debrid services the user can plug their own account into (keys live in the VortX account, never here).
 export const DEBRID_SERVICES = [
@@ -39,6 +39,8 @@ export interface SingularityFilters {
   excludeCam: boolean;
   includeTags: string[]; // keep only sources carrying at least one of these tags (audio/encode/visual)
   excludeTags: string[]; // drop sources carrying any of these tags
+  includeLanguages: string[]; // keep only sources in at least one of these audio languages (lenient on unknowns)
+  excludeLanguages: string[]; // drop sources in any of these audio languages
   maxResults: number; // cap total results (0 = unlimited)
   maxPerResolution: number; // cap results per resolution (0 = unlimited)
   dedup: boolean; // collapse same-release torrents/nzb (http fallbacks never collapsed)
@@ -59,7 +61,7 @@ export const DEFAULT_CONFIG: SingularityConfig = {
   debridServices: [],
   usenetServices: [],
   addons: [],
-  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], maxResults: 0, maxPerResolution: 0, dedup: false },
+  filters: { resolutions: [], excludeRegex: "", minSeeders: 0, maxSizeGB: 100, hdrOnly: false, excludeCam: true, includeTags: [], excludeTags: [], includeLanguages: [], excludeLanguages: [], maxResults: 0, maxPerResolution: 0, dedup: false },
   sort: ["cached", "resolution", "seeders"],
   format: "standard",
   proxyEnabled: false,
@@ -113,6 +115,8 @@ export function validateConfig(raw: unknown): SingularityConfig {
       excludeCam: bool(f.excludeCam, true),
       includeTags: pickKnown(f.includeTags, KNOWN_TAGS_LIST, false),
       excludeTags: pickKnown(f.excludeTags, KNOWN_TAGS_LIST, false),
+      includeLanguages: pickKnown(f.includeLanguages, KNOWN_LANGUAGES_LIST),
+      excludeLanguages: pickKnown(f.excludeLanguages, KNOWN_LANGUAGES_LIST),
       maxResults: clamp(f.maxResults, 0, 200, 0),
       maxPerResolution: clamp(f.maxPerResolution, 0, 50, 0),
       dedup: bool(f.dedup, false),
