@@ -55,6 +55,7 @@ console.log("health + manifest");
   const nm = await get("/manifest.vortx.json");
   ok(nm.status === 200 && nm.json?.schema === "vortx-source/1" && nm.json?.kind === "native_vortx", "GET /manifest.vortx.json is the native vortx-source/1 manifest");
   ok(nm.json?.hive?.contributes === true && nm.json?.ranking?.emitsScoreInputs === true && nm.json?.transport?.kind === "federated", "native manifest declares hive + ranking + federated transport hooks");
+  ok(nm.json?.signature === undefined, "native manifest is unsigned by default (signed only when MANIFEST_SIGNING_KEY is set)");
   ok(m.json?.resources?.includes("catalog") && (m.json?.catalogs || []).some((c) => /trending/i.test(c.id)), "manifest declares the always-on Trending catalog");
   const cat = await get("/catalog/movie/singularity.trending.json");
   ok(cat.status === 200 && Array.isArray(cat.json?.metas), "GET /catalog/movie/singularity.trending returns a metas array");

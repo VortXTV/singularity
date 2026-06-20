@@ -25,6 +25,8 @@ import {
   isNodeBarred,
   buildManifest,
   buildNativeManifest,
+  canonicalizeManifest,
+  manifestSigningBytes,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -161,7 +163,17 @@ console.log("buildNativeManifest (vortx-source/1)");
   ok(nm.debrid && nm.debrid.yieldsInfohash === true && nm.debrid.cachedCheck === "hive", "debrid hook: yields infohash, cache via hive");
   ok(nm.hive && nm.hive.contributes === true && nm.hive.consumes === true, "hive hook: contributes + consumes");
   ok(nm.ranking && nm.ranking.emitsScoreInputs === true, "ranking hook: emits structured score inputs (the vortx side-channel)");
-  ok(nm.config && nm.config.scope === "per-profile" && nm.signature === undefined, "per-profile config; manifest unsigned until canonical signing lands");
+  ok(nm.config && nm.config.scope === "per-profile" && nm.signature === undefined, "per-profile config; manifest unsigned by default (signed only when a key is configured)");
+  // canonicalizeManifest: byte-for-byte with vortx-core crates/source/src/canonical.rs (sorted keys, compact)
+  ok(canonicalizeManifest({ b: 1, a: [3, 2], c: "x", n: null }) === '{"a":[3,2],"b":1,"c":"x","n":null}', "objects sort keys, arrays keep order, compact, null preserved");
+  ok(canonicalizeManifest({ z: { y: 1, x: 2 } }) === '{"z":{"x":2,"y":1}}', "nested object keys are sorted (values follow their keys)");
+  const canon = canonicalizeManifest(nm);
+  ok(!canon.includes("\n") && !canon.includes(": ") && !canon.includes(", "), "no insignificant whitespace (matches canonical.rs)");
+  ok(canon.indexOf('"id"') < canon.indexOf('"name"') && canon.indexOf('"name"') < canon.indexOf('"schema"'), "top-level keys sorted: id < name < schema (canonical.rs invariant)");
+  ok(canonicalizeManifest(JSON.parse(canon)) === canon, "canonicalization is idempotent through a JSON round-trip");
+  // manifestSigningBytes excludes the signature field (both sides sign everything BUT the signature)
+  ok(manifestSigningBytes({ a: 1, b: 2, signature: { alg: "ed25519", keyId: "k", sig: "s" } }) === '{"a":1,"b":2}', "signing bytes omit the signature key");
+  ok(manifestSigningBytes(nm) === canonicalizeManifest(nm), "an unsigned manifest's signing bytes == its canonical form");
 }
 
 // --- corpus-scoped catalog search: parse the extra + intersect candidates with corpus presence ---
@@ -699,6 +711,20 @@ console.log("reConfirmationVindicates (false-reporter counter-signal)");
   ok(reConfirmationVindicates(5, 5) === true, "strong re-confirmation + many reporters still vindicates");
   ok(reConfirmationVindicates(0, 0) === false, "a brand-new claim with no reports never triggers the counter-signal");
 }
+
+// --- manifest signature: a real Ed25519 sign over manifestSigningBytes verifies (engine-mergeable) ---
+console.log("manifest signature round-trip (Ed25519 over the canonical bytes)");
+await (async () => {
+  const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  const m = buildNativeManifest("https://singularity.vortx.tv");
+  const bytes = new TextEncoder().encode(manifestSigningBytes(m));
+  const sig = await crypto.subtle.sign({ name: "Ed25519" }, kp.privateKey, bytes);
+  const okSig = await crypto.subtle.verify({ name: "Ed25519" }, kp.publicKey, sig, bytes);
+  ok(okSig, "an Ed25519 signature over manifestSigningBytes verifies");
+  // attaching the signature must NOT change the bytes the engine re-derives (it strips signature first)
+  const signed = { ...m, signature: { alg: "ed25519", keyId: "k", sig: "AAAA" } };
+  ok(manifestSigningBytes(signed) === manifestSigningBytes(m), "the attached signature does not alter the signing bytes");
+})();
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

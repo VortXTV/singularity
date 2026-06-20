@@ -43,7 +43,7 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/manifest.json` | none | Base Stremio add-on manifest (stream resource, movie+series, `tt` ids) - the Stremio/Nuvio fallback |
-| GET | `/manifest.vortx.json` | none | VortX-NATIVE manifest (`vortx-source/1`, `kind=native_vortx`) with the engine hooks (hive/debrid/ranking/config) - requested first by VortX |
+| GET | `/manifest.vortx.json` | none | VortX-NATIVE manifest (`vortx-source/1`, `kind=native_vortx`) with the engine hooks (hive/debrid/ranking/config) - requested first by VortX. Ed25519-signed (`ManifestSignature`) over the engine's canonical bytes when `MANIFEST_SIGNING_KEY` is set, else unsigned |
 | GET | `/configure` | none | The VortX-styled config UI (build your preferences -> a manifest URL) |
 | GET | `/:config/manifest.json` | none | Configured manifest; resources + catalogs reflect your config |
 | GET | `/stream/:type/:id.json` | none | Corpus sources for a title as Stremio streams (trusted + fresh, cached-first, infohash-only) |

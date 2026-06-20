@@ -27,6 +27,7 @@ import {
   isNodeBarred,
   buildManifest,
   buildNativeManifest,
+  manifestSigningBytes,
   nodeIdFromDigest,
   cacheFactSigningString,
   HIVE_DEBRID_SERVICES,
@@ -64,6 +65,10 @@ export interface Env {
   // Shared secret that gates the manual POST /hive/pull trigger. UNSET = the endpoint is disabled (the cron
   // Trigger still runs the sweep). A caller must send a matching `x-pull-secret` header.
   PULL_SECRET?: string;
+  // Optional Ed25519 private key (an Ed25519 JWK JSON string, with `d` + `x`) used to SIGN the native
+  // vortx-source/1 manifest so the engine treats Singularity as a SIGNED native source. UNSET = manifest is
+  // served unsigned (the current default). The key is a Worker secret; the public part (`x`) becomes the keyId.
+  MANIFEST_SIGNING_KEY?: string;
 }
 
 const SIG_WINDOW_MS = 5 * 60 * 1000; // reject signed payloads more than 5 min off the clock (anti-replay)
@@ -163,9 +168,27 @@ async function handleManifest(): Promise<Response> {
   return json(buildManifest(), 200, true);
 }
 
+// Attach a detached Ed25519 ManifestSignature over the canonical manifest bytes (manifestSigningBytes), so
+// the engine can verify Singularity as a SIGNED native source. The signing key is an Ed25519 JWK secret
+// (env.MANIFEST_SIGNING_KEY); its public part (`x`) is the keyId. No key -> the manifest is returned unsigned.
+async function signNativeManifest(manifest: Record<string, unknown>, env: Env): Promise<Record<string, unknown>> {
+  if (!env.MANIFEST_SIGNING_KEY) return manifest;
+  try {
+    const jwk = JSON.parse(env.MANIFEST_SIGNING_KEY) as { x?: string; d?: string; kty?: string; crv?: string };
+    if (!jwk.x || !jwk.d) return manifest;
+    const key = await crypto.subtle.importKey("jwk", { ...jwk, kty: "OKP", crv: "Ed25519", key_ops: ["sign"], ext: false } as JsonWebKey, { name: "Ed25519" }, false, ["sign"]);
+    const sig = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, key, enc(manifestSigningBytes(manifest))));
+    const sigB64 = btoa(String.fromCharCode(...sig)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return { ...manifest, signature: { alg: "ed25519", keyId: jwk.x, sig: sigB64 } };
+  } catch {
+    return manifest; // a malformed key never breaks the manifest; serve it unsigned
+  }
+}
+
 // VortX-native manifest (vortx-source/1). VortX requests this FIRST; Stremio + Nuvio keep using /manifest.json.
-function handleNativeManifest(req: Request): Response {
-  return json(buildNativeManifest(new URL(req.url).origin), 200, true);
+async function handleNativeManifest(req: Request, env: Env): Promise<Response> {
+  const manifest = await signNativeManifest(buildNativeManifest(new URL(req.url).origin), env);
+  return json(manifest, 200, true);
 }
 
 async function handleStream(env: Env, type: string, idWithExt: string, config?: SingularityConfig): Promise<Response> {
@@ -880,7 +903,7 @@ export default {
       return json({ service: "singularity", status: "ok", manifest: "/manifest.json", note: "dormant groundwork; public hive-mind ships 0.4.0+" });
     }
     if (req.method === "GET" && path === "/manifest.json") return handleManifest();
-    if (req.method === "GET" && (path === "/manifest.vortx.json" || path === "/vortx-source.json")) return handleNativeManifest(req);
+    if (req.method === "GET" && (path === "/manifest.vortx.json" || path === "/vortx-source.json")) return handleNativeManifest(req, env);
     if (req.method === "GET" && path === "/configure") return handleConfigure(req);
 
     // Configured routes: /:config/(manifest.json | stream/... | catalog/...) where :config = base64url(JSON).

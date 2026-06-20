@@ -408,6 +408,32 @@ export function buildNativeManifest(origin: string, version = "0.1.0"): Record<s
   };
 }
 
+/**
+ * Canonical manifest serialization, byte-for-byte identical to the engine's crates/source/src/canonical.rs:
+ * objects -> keys sorted (lexicographic; manifest keys are all ASCII so JS sort() == Rust byte sort), compact
+ * (no insignificant whitespace), scalars via JSON.stringify (the serde_json equivalent for ASCII strings +
+ * integers). This is the deterministic byte form an Ed25519 ManifestSignature covers, so reformatting the
+ * JSON can never invalidate the signature.
+ */
+export function canonicalizeManifest(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return "[" + value.map(canonicalizeManifest).join(",") + "]";
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonicalizeManifest(obj[k])).join(",") + "}";
+  }
+  return JSON.stringify(value); // string / number / boolean - serde_json-equivalent for ASCII + integers
+}
+
+/** The exact bytes-to-sign for a manifest signature: the canonical form with the `signature` key excluded
+ *  (the engine's signature field is skip_serializing_if=None, so both sides sign everything BUT the signature). */
+export function manifestSigningBytes(manifest: Record<string, unknown>): string {
+  const rest: Record<string, unknown> = {};
+  for (const k of Object.keys(manifest)) if (k !== "signature") rest[k] = manifest[k];
+  return canonicalizeManifest(rest);
+}
+
 export interface ParsedMetaId {
   imdb: string | null;
   season: number | null;
