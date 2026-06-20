@@ -43,8 +43,10 @@ CREATE INDEX IF NOT EXISTS idx_torrents_meta ON torrents (meta_id);
 -- resolved link, never a token. Trusted once 3 independent nodes confirm OR the reader's own debrid
 -- confirms (see src/corpus.ts isCacheTrusted). last_verified drives the TTL; recent outranks old.
 CREATE TABLE IF NOT EXISTS cache_facts (
-  info_hash     TEXT NOT NULL,
-  service       TEXT NOT NULL,                  -- "realdebrid" | "torbox" | "alldebrid" | "premiumize" | ...
+  -- info_hash holds a 40-hex torrent btih OR a 32-hex nzb MD5; the CHECK blocks any malformed key from
+  -- polluting trust counts (lengths are provably non-overlapping, so the two kinds never collide).
+  info_hash     TEXT NOT NULL CHECK (length(info_hash) IN (32, 40)),
+  service       TEXT NOT NULL,                  -- debrid OR usenet service slug
   cached        INTEGER NOT NULL,               -- 1 cached / 0 not
   confirmations INTEGER NOT NULL DEFAULT 0,     -- denormalized distinct-node count (see cache_confirmations)
   last_verified INTEGER NOT NULL,
@@ -57,7 +59,7 @@ CREATE TABLE IF NOT EXISTS cache_facts (
 -- throwaway nodes. Real resistance (proof-of-work / stake / contribution-history / IP diversity) is later
 -- federation work; see README "Not yet implemented". Do not present the 3-node gate as Sybil-proof.
 CREATE TABLE IF NOT EXISTS cache_confirmations (
-  info_hash TEXT NOT NULL,
+  info_hash TEXT NOT NULL CHECK (length(info_hash) IN (32, 40)),
   service   TEXT NOT NULL,
   node_id   TEXT NOT NULL,
   ts        INTEGER NOT NULL,
@@ -67,7 +69,7 @@ CREATE TABLE IF NOT EXISTS cache_confirmations (
 -- Live swarm health: continuously re-scraped seeders so dead swarms are filtered BEFORE the click
 -- (many indexers serve stale counts; live freshness is our edge). Keyed by infohash, freshest wins.
 CREATE TABLE IF NOT EXISTS health (
-  info_hash TEXT PRIMARY KEY,
+  info_hash TEXT PRIMARY KEY CHECK (length(info_hash) = 40),  -- torrent swarms only
   seeders   INTEGER,
   leechers  INTEGER,
   last_seen INTEGER NOT NULL
@@ -84,3 +86,46 @@ CREATE TABLE IF NOT EXISTS reports (
   ts        INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reports_hash ON reports (info_hash, service);
+
+-- HTTP / direct stream index: which STABLE PUBLIC stream URL serves a title. Public, tokenless URLs only
+-- (sanitizeHttpFact rejects userinfo + token/session query params at ingest), so these are safe to share
+-- and play on any client. added_at is touched on re-contribution (doubles as last-seen for freshness).
+-- Unlike a torrent (client resolves the infohash) or an NZB (resolved on-device), an HTTP URL is played
+-- VERBATIM by every client, so a single node must NOT be able to push one to everyone. It is gated behind
+-- the SAME distinct-node confirmation as the cache: a URL is only surfaced once `confirmations` reaches
+-- MIN_CONFIRMATIONS (see http_confirmations + handleStream).
+CREATE TABLE IF NOT EXISTS http_streams (
+  url           TEXT NOT NULL,
+  meta_id       TEXT NOT NULL,                     -- "tt1234567" or "tt1234567:1:5"
+  quality       TEXT,
+  size          INTEGER,
+  source        TEXT,
+  confirmations INTEGER NOT NULL DEFAULT 0,        -- distinct non-barred nodes that contributed this URL
+  added_at      INTEGER NOT NULL,
+  PRIMARY KEY (url, meta_id)
+);
+CREATE INDEX IF NOT EXISTS idx_http_meta ON http_streams (meta_id);
+
+-- One row per (http url, title, confirming node) so the gate counts DISTINCT nodes, not re-posts.
+CREATE TABLE IF NOT EXISTS http_confirmations (
+  url     TEXT NOT NULL,
+  meta_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  ts      INTEGER NOT NULL,
+  PRIMARY KEY (url, meta_id, node_id)
+);
+
+-- NZB / Usenet index: which .nzb hash serves a title. Hash metadata only - never the .nzb body, the
+-- indexer apikey, or NNTP creds; playback is resolved on-device with the user's own provider. The
+-- per-usenet-service cache booleans reuse the cache_facts + cache_confirmations tables above (keyed by
+-- the nzb_hash in the info_hash column - a 32-hex MD5 never collides with a 40-hex torrent btih).
+CREATE TABLE IF NOT EXISTS nzbs (
+  nzb_hash TEXT NOT NULL,                          -- 32-hex (MD5 of the .nzb)
+  meta_id  TEXT NOT NULL,
+  quality  TEXT,
+  size     INTEGER,
+  source   TEXT,
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (nzb_hash, meta_id)
+);
+CREATE INDEX IF NOT EXISTS idx_nzbs_meta ON nzbs (meta_id);

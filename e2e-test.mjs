@@ -113,5 +113,31 @@ console.log("configure page + configured manifest");
   ok(cat.status === 200 && Array.isArray(cat.json?.metas), "configured catalog responds gracefully (metas array)");
 }
 
+console.log("HTTP (3-node gated) + NZB sources");
+{
+  const META2 = "tt0068646"; // The Godfather
+  const PUB = "https://cdn.example.com/godfather-1080p.mkv";
+  const NZB = "cd".repeat(16); // 32-hex
+  const n1 = await newNode(), n2 = await newNode(), n3 = await newNode();
+  // NZB surfaces from a single node (resolved on-device); HTTP is played verbatim so it needs 3 nodes.
+  const res = await contribute(n1, [
+    { kind: "http", metaId: META2, url: PUB, quality: "1080p", source: "DirectHost", size: 8e9 },
+    { kind: "nzb", metaId: META2, nzbHash: NZB, quality: "2160p", source: "MyIndexer", service: "torbox", cached: true, size: 3e10 },
+  ]);
+  ok(res.status === 200 && res.json?.accepted === 2, "http + nzb facts accepted");
+  let streams = (await get(`/stream/movie/${META2}.json`)).json?.streams || [];
+  ok(!streams.some((x) => x.url === PUB), "HTTP url NOT surfaced from a single node (gate holds)");
+  ok(streams.some((x) => /NZB/i.test(x.title)), "NZB source surfaces from one node (on-device resolve marker)");
+  // two more distinct nodes confirm the same URL -> it crosses the gate
+  await contribute(n2, [{ kind: "http", metaId: META2, url: PUB, quality: "1080p", source: "DirectHost" }]);
+  await contribute(n3, [{ kind: "http", metaId: META2, url: PUB, quality: "1080p", source: "DirectHost" }]);
+  const s = await get(`/stream/movie/${META2}.json`);
+  streams = s.json?.streams || [];
+  const httpS = streams.find((x) => x.url === PUB);
+  ok(!!httpS && !httpS.infoHash, "after 3 distinct nodes, HTTP url surfaces (public url, no infoHash)");
+  const blob = JSON.stringify(s.json).toLowerCase();
+  ok(!blob.includes("token") && !blob.includes("secret"), "no token/secret in the mixed-kind response");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

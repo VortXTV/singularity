@@ -19,6 +19,8 @@
 
 import {
   sanitizeContribution,
+  sanitizeHttpFact,
+  sanitizeNzbFact,
   isCacheTrusted,
   isFresh,
   isNodeBarred,
@@ -26,6 +28,7 @@ import {
   buildStreamResponse,
   parseMetaId,
   CACHE_TTL_MS,
+  MIN_CONFIRMATIONS,
   type CorpusStream,
 } from "./corpus.ts";
 import { decodeConfig, buildConfiguredManifest, type SingularityConfig } from "./config.ts";
@@ -134,67 +137,134 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
   const metaId = meta.season != null && meta.episode != null ? `${meta.imdb}:${meta.season}:${meta.episode}` : meta.imdb;
   const now = Date.now();
 
-  const torrents = await env.DB.prepare(
-    // LIMIT stays well under D1's 100 bound-parameter cap: the info_hash list below becomes an IN (...)
-    // with one bound param each, so 50 sources/title keeps that query within limits (plenty to rank).
-    "SELECT info_hash, quality, size, source, file_idx, added_at FROM torrents WHERE meta_id = ? LIMIT 50",
-  )
-    .bind(metaId)
-    .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; added_at: number }>();
-  const rows = torrents.results ?? [];
-  if (rows.length === 0) return json({ streams: [] }, 200, true);
+  // The corpus serves three kinds for a title: torrents, direct/HTTP public streams, and NZB/Usenet.
+  // (LIMITs keep the cache IN-clause below D1's 100 bound-parameter cap: 50 torrent + 30 nzb hashes = 80.)
+  const torrents = (
+    await env.DB.prepare("SELECT info_hash, quality, size, source, file_idx, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
+      .bind(metaId)
+      .all<{ info_hash: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; added_at: number }>()
+  ).results ?? [];
+  const httpRows = (
+    // Only HTTP URLs confirmed by >= MIN_CONFIRMATIONS distinct nodes are surfaced (gated like the cache).
+    await env.DB.prepare("SELECT url, quality, size, source, added_at FROM http_streams WHERE meta_id = ? AND confirmations >= ? LIMIT 30")
+      .bind(metaId, MIN_CONFIRMATIONS)
+      .all<{ url: string; quality: string | null; size: number | null; source: string | null; added_at: number }>()
+  ).results ?? [];
+  const nzbRows = (
+    await env.DB.prepare("SELECT nzb_hash, quality, size, source, added_at FROM nzbs WHERE meta_id = ? LIMIT 30")
+      .bind(metaId)
+      .all<{ nzb_hash: string; quality: string | null; size: number | null; source: string | null; added_at: number }>()
+  ).results ?? [];
+  if (torrents.length === 0 && httpRows.length === 0 && nzbRows.length === 0) return json({ streams: [] }, 200, true);
 
-  // Hard-cap the IN-clause width independent of the LIMIT above, so it can never exceed D1's
-  // 100-bound-parameter ceiling even if the torrents LIMIT is raised later.
-  const hashes = rows.map((r) => r.info_hash).slice(0, 50);
-  const placeholders = hashes.map(() => "?").join(",");
-  const caches = await env.DB.prepare(
-    `SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE info_hash IN (${placeholders})`,
-  )
-    .bind(...hashes)
-    .all<{ info_hash: string; service: string; cached: number; confirmations: number; last_verified: number }>();
-  const healths = await env.DB.prepare(
-    `SELECT info_hash, seeders, last_seen FROM health WHERE info_hash IN (${placeholders})`,
-  )
-    .bind(...hashes)
-    .all<{ info_hash: string; seeders: number | null; last_seen: number }>();
-
+  // Cache facts cover both torrent infohashes and nzb hashes (shared trust tables); health is torrent-only.
+  const torrentHashes = torrents.map((r) => r.info_hash);
+  const cacheHashes = [...torrentHashes, ...nzbRows.map((r) => r.nzb_hash)].slice(0, 95);
   const cacheByHash = new Map<string, string[]>();
-  for (const c of caches.results ?? []) {
-    if (c.cached !== 1) continue;
-    // Server-side trust = the 3-distinct-node gate + TTL freshness. The "own debrid" short-circuit in
-    // isCacheTrusted is a READER-side concern (the app, holding the user's own debrid, may treat its own
-    // cache-check as authoritative) - the server cannot know the reader's debrid, so it never passes it.
-    if (!isCacheTrusted({ confirmations: c.confirmations }) || !isFresh(c.last_verified, now)) continue;
-    // If the user configured which debrid services they use, only surface cache status for those.
-    if (config && config.debridServices.length > 0 && !config.debridServices.includes(c.service)) continue;
-    const list = cacheByHash.get(c.info_hash) ?? [];
-    list.push(c.service);
-    cacheByHash.set(c.info_hash, list);
+  if (cacheHashes.length > 0) {
+    const ph = cacheHashes.map(() => "?").join(",");
+    const caches = await env.DB.prepare(
+      `SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE info_hash IN (${ph})`,
+    )
+      .bind(...cacheHashes)
+      .all<{ info_hash: string; service: string; cached: number; confirmations: number; last_verified: number }>();
+    for (const c of caches.results ?? []) {
+      if (c.cached !== 1) continue;
+      // Server-side trust = the 3-distinct-node gate + TTL freshness. The "own debrid" short-circuit in
+      // isCacheTrusted is a READER-side concern - the server can't know the reader's debrid, so never passes it.
+      if (!isCacheTrusted({ confirmations: c.confirmations }) || !isFresh(c.last_verified, now)) continue;
+      const list = cacheByHash.get(c.info_hash) ?? [];
+      list.push(c.service);
+      cacheByHash.set(c.info_hash, list);
+    }
   }
   const healthByHash = new Map<string, { seeders: number | null; last_seen: number }>();
-  for (const h of healths.results ?? []) healthByHash.set(h.info_hash, { seeders: h.seeders, last_seen: h.last_seen });
+  if (torrentHashes.length > 0) {
+    const ph = torrentHashes.map(() => "?").join(",");
+    const healths = await env.DB.prepare(`SELECT info_hash, seeders, last_seen FROM health WHERE info_hash IN (${ph})`)
+      .bind(...torrentHashes)
+      .all<{ info_hash: string; seeders: number | null; last_seen: number }>();
+    for (const h of healths.results ?? []) healthByHash.set(h.info_hash, { seeders: h.seeders, last_seen: h.last_seen });
+  }
 
-  const corpus: CorpusStream[] = rows.map((r) => {
+  // Honor the user's configured service lists: only surface cache status for services they actually use.
+  const allowDebrid = (svc: string) => !config || config.debridServices.length === 0 || config.debridServices.includes(svc);
+  const allowUsenet = (svc: string) => !config || config.usenetServices.length === 0 || config.usenetServices.includes(svc);
+
+  const corpus: CorpusStream[] = [];
+  for (const r of torrents) {
     const h = healthByHash.get(r.info_hash);
-    return {
+    corpus.push({
+      kind: "torrent",
       infoHash: r.info_hash,
       quality: r.quality,
       size: r.size,
       source: r.source,
       seeders: h?.seeders ?? null,
-      cachedOn: cacheByHash.get(r.info_hash) ?? [],
-      // Anti-cam / fake-infohash trust is a later additive layer; for now a stored torrent from a
-      // non-barred signed node is surfaced, and the CACHE trust gate (3-node-or-own) is enforced above.
+      cachedOn: (cacheByHash.get(r.info_hash) ?? []).filter(allowDebrid),
+      // Anti-cam / fake-infohash trust is a later additive layer; a stored source from a non-barred signed
+      // node is surfaced, and the CACHE trust gate (3-node-or-own) is enforced above.
       trusted: true,
-      // The torrent association is touched on every re-contribution, so added_at IS its last-seen;
-      // a torrent nobody has re-contributed within the TTL falls out of results (freshness).
       lastVerified: Math.max(r.added_at, h?.last_seen ?? 0),
       fileIdx: r.file_idx,
-    };
-  });
+    });
+  }
+  for (const r of httpRows) {
+    corpus.push({ kind: "http", url: r.url, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: [], trusted: true, lastVerified: r.added_at });
+  }
+  for (const r of nzbRows) {
+    corpus.push({ kind: "nzb", nzbHash: r.nzb_hash, quality: r.quality, size: r.size, source: r.source, seeders: null, cachedOn: (cacheByHash.get(r.nzb_hash) ?? []).filter(allowUsenet), trusted: true, lastVerified: r.added_at });
+  }
 
   return json(buildStreamResponse(corpus, now), 200, true);
+}
+
+// Record a DISTINCT-node cache confirmation for a content hash + service (a torrent infohash OR an nzb
+// hash - the same trust tables serve both), then recompute the trusted count (non-barred, within TTL) and
+// upsert the cache fact. No self-attested bypass: a contributor counts as exactly one node.
+async function recordCache(env: Env, hash: string, service: string, nodeId: string, now: number): Promise<void> {
+  // Defensive: only a 40-hex torrent btih or a 32-hex nzb MD5 may key the trust tables (matches the
+  // schema CHECK), so a malformed hash from any future call-site can never pollute cache counts.
+  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(hash)) return;
+  await env.DB.prepare(
+    "INSERT INTO cache_confirmations (info_hash, service, node_id, ts) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(info_hash, service, node_id) DO UPDATE SET ts = excluded.ts",
+  )
+    .bind(hash, service, nodeId, now)
+    .run();
+  const cnt = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM cache_confirmations cc JOIN nodes n ON n.id = cc.node_id " +
+      "WHERE cc.info_hash = ? AND cc.service = ? AND n.banned = 0 AND cc.ts > ?",
+  )
+    .bind(hash, service, now - CACHE_TTL_MS)
+    .first<{ n: number }>();
+  await env.DB.prepare(
+    "INSERT INTO cache_facts (info_hash, service, cached, confirmations, last_verified) VALUES (?, ?, 1, ?, ?) " +
+      "ON CONFLICT(info_hash, service) DO UPDATE SET cached = 1, confirmations = excluded.confirmations, last_verified = excluded.last_verified",
+  )
+    .bind(hash, service, cnt?.n ?? 1, now)
+    .run();
+}
+
+// An HTTP URL is played verbatim by every client, so it is gated like the cache: record a DISTINCT-node
+// confirmation for (url, title), recompute the non-barred fresh count, and store it on http_streams.
+// handleStream only surfaces a URL once that count reaches MIN_CONFIRMATIONS.
+async function recordHttpConfirmation(env: Env, url: string, metaId: string, nodeId: string, now: number): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO http_confirmations (url, meta_id, node_id, ts) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(url, meta_id, node_id) DO UPDATE SET ts = excluded.ts",
+  )
+    .bind(url, metaId, nodeId, now)
+    .run();
+  const cnt = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM http_confirmations hc JOIN nodes n ON n.id = hc.node_id " +
+      "WHERE hc.url = ? AND hc.meta_id = ? AND n.banned = 0 AND hc.ts > ?",
+  )
+    .bind(url, metaId, now - CACHE_TTL_MS)
+    .first<{ n: number }>();
+  await env.DB.prepare("UPDATE http_streams SET confirmations = ? WHERE url = ? AND meta_id = ?")
+    .bind(cnt?.n ?? 1, url, metaId)
+    .run();
 }
 
 async function handleContribute(req: Request, env: Env, ip: string): Promise<Response> {
@@ -225,15 +295,49 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
 
   let accepted = 0;
   for (const raw of facts as Array<Record<string, unknown>>) {
+    // metaId is a property of each (signed) fact, so it is covered by the signature over JSON(facts);
+    // a relay cannot swap which title a source claims to serve without breaking the sig.
+    const meta = parseMetaId(typeof raw.metaId === "string" ? raw.metaId : "");
+    if (!meta.imdb) continue; // a fact must say which title it serves
+    const metaId = meta.season != null && meta.episode != null ? `${meta.imdb}:${meta.season}:${meta.episode}` : meta.imdb;
+    const kind = typeof raw.kind === "string" ? raw.kind : "torrent";
+
+    if (kind === "http") {
+      // HTTP/direct: a STABLE PUBLIC stream URL (tokenless, enforced by sanitizeHttpFact). Gated behind
+      // distinct-node confirmation (recordHttpConfirmation) because it is played verbatim by every client.
+      const hf = sanitizeHttpFact(raw);
+      if (!hf) continue;
+      await env.DB.prepare(
+        "INSERT INTO http_streams (url, meta_id, quality, size, source, confirmations, added_at) VALUES (?, ?, ?, ?, ?, 0, ?) " +
+          "ON CONFLICT(url, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, http_streams.quality), " +
+          "size = COALESCE(excluded.size, http_streams.size), source = COALESCE(excluded.source, http_streams.source), added_at = excluded.added_at",
+      )
+        .bind(hf.url, metaId, hf.quality, hf.size, hf.source, now)
+        .run();
+      await recordHttpConfirmation(env, hf.url, metaId, nodeId, now);
+      accepted++;
+      continue;
+    }
+
+    if (kind === "nzb") {
+      // NZB/Usenet: hash metadata only; resolved on-device. Cache booleans reuse the trust tables.
+      const nf = sanitizeNzbFact(raw);
+      if (!nf) continue;
+      await env.DB.prepare(
+        "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, added_at) VALUES (?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(nzb_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, nzbs.quality), " +
+          "size = COALESCE(excluded.size, nzbs.size), source = COALESCE(excluded.source, nzbs.source), added_at = excluded.added_at",
+      )
+        .bind(nf.nzbHash, metaId, nf.quality, nf.size, nf.source, now)
+        .run();
+      if (nf.service && nf.cached) await recordCache(env, nf.nzbHash, nf.service, nodeId, now);
+      accepted++;
+      continue;
+    }
+
+    // torrent (default)
     const clean = sanitizeContribution(raw);
     if (!clean) continue;
-    // metaId is a property of each (signed) fact, so it is covered by the signature over JSON(facts);
-    // a relay cannot swap which title an infohash claims to serve without breaking the sig.
-    const metaRaw = typeof raw.metaId === "string" ? raw.metaId : "";
-    const meta = parseMetaId(metaRaw);
-    if (!meta.imdb) continue; // a torrent fact must say which title it serves
-    const metaId = meta.season != null && meta.episode != null ? `${meta.imdb}:${meta.season}:${meta.episode}` : meta.imdb;
-
     // 1) torrent association (infohash serves this title)
     await env.DB.prepare(
       "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, added_at) VALUES (?, ?, ?, ?, ?, ?, ?) " +
@@ -243,7 +347,6 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     )
       .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, now)
       .run();
-
     // 2) live swarm health (re-scraped each time; freshest wins)
     if (clean.seeders != null) {
       await env.DB.prepare(
@@ -253,33 +356,8 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
         .bind(clean.infoHash, clean.seeders, now)
         .run();
     }
-
-    // 3) debrid cache fact (the gold). Record a DISTINCT-node confirmation, then recompute the count so
-    //    isCacheTrusted (3 nodes OR own debrid) gates what readers see. We store the boolean, never a link.
-    if (clean.service && clean.cached) {
-      await env.DB.prepare(
-        "INSERT INTO cache_confirmations (info_hash, service, node_id, ts) VALUES (?, ?, ?, ?) " +
-          "ON CONFLICT(info_hash, service, node_id) DO UPDATE SET ts = excluded.ts",
-      )
-        .bind(clean.infoHash, clean.service, nodeId, now)
-        .run();
-      // Count only DISTINCT, non-barred nodes whose confirmation is still within the TTL, so banned or
-      // stale confirmations cannot keep a fact "trusted". No self-attested bypass: a contributor counts
-      // as exactly one node, and trust still requires MIN_CONFIRMATIONS distinct nodes (corpus.ts).
-      const cnt = await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM cache_confirmations cc JOIN nodes n ON n.id = cc.node_id " +
-          "WHERE cc.info_hash = ? AND cc.service = ? AND n.banned = 0 AND cc.ts > ?",
-      )
-        .bind(clean.infoHash, clean.service, now - CACHE_TTL_MS)
-        .first<{ n: number }>();
-      const confirmations = cnt?.n ?? 1;
-      await env.DB.prepare(
-        "INSERT INTO cache_facts (info_hash, service, cached, confirmations, last_verified) VALUES (?, ?, 1, ?, ?) " +
-          "ON CONFLICT(info_hash, service) DO UPDATE SET cached = 1, confirmations = excluded.confirmations, last_verified = excluded.last_verified",
-      )
-        .bind(clean.infoHash, clean.service, confirmations, now)
-        .run();
-    }
+    // 3) debrid cache fact (the gold) - the boolean, never a link
+    if (clean.service && clean.cached) await recordCache(env, clean.infoHash, clean.service, nodeId, now);
     accepted++;
   }
   return json({ accepted, stored: true });
@@ -296,12 +374,16 @@ async function handleReport(req: Request, env: Env, ip: string): Promise<Respons
   const service = typeof body.service === "string" ? body.service.toLowerCase() : "";
   const reporter = typeof body.reporter === "string" ? body.reporter.toLowerCase() : "";
   // reporter must be a real node id (sha256(pubkey) = 64 hex) that EXISTS, so a report cannot be forged
-  // against an arbitrary node id (anti-griefing). service is a debrid slug, infohash is btih hex.
-  if (!/^[a-f0-9]{40}$/.test(infoHash) || !/^[a-z0-9]{2,24}$/.test(service) || !/^[a-f0-9]{64}$/.test(reporter)) {
+  // against an arbitrary node id (anti-griefing). hash is a 40-hex torrent btih OR a 32-hex nzb hash.
+  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(infoHash) || !/^[a-z0-9]{2,24}$/.test(service) || !/^[a-f0-9]{64}$/.test(reporter)) {
     return json({ error: "bad_request" }, 400);
   }
   const node = await env.DB.prepare("SELECT 1 AS ok FROM nodes WHERE id = ?").bind(reporter).first<{ ok: number }>();
   if (!node) return json({ error: "unknown_node" }, 403);
+  // Only accept a report against a cache fact that actually exists, so the table can't grow unbounded with
+  // reports for arbitrary hash+service pairs.
+  const fact = await env.DB.prepare("SELECT 1 AS ok FROM cache_facts WHERE info_hash = ? AND service = ?").bind(infoHash, service).first<{ ok: number }>();
+  if (!fact) return json({ error: "no_such_claim" }, 404);
   await env.DB.prepare("INSERT INTO reports (info_hash, service, reporter, ts) VALUES (?, ?, ?, ?)")
     .bind(infoHash, service, reporter, Date.now())
     .run();

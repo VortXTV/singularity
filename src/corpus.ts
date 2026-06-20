@@ -66,6 +66,85 @@ export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | 
   };
 }
 
+const HEX32 = /^[a-f0-9]{32}$/; // NZB hash (MD5 of the .nzb), distinct length from a 40-hex torrent btih
+// A query-param NAME that marks a URL as user/session-specific (CDN-signed, OAuth, expiring). Tested
+// against the DECODED param name (via URLSearchParams) so %XX obfuscation cannot defeat it. Substring
+// match (e.g. "x-amz-security-token" contains "token", "Key-Pair-Id" contains "key").
+const TOKEN_NAME_RE = /token|key|auth|sig|password|passwd|secret|jwt|session|expires|hmac|policy|signature|credential|nonce|ticket|x-amz|keypair|\bsid\b|\bott\b|\bcode\b/i;
+const MAX_URL_LEN = 2048;
+
+/**
+ * True only for a STABLE PUBLIC http(s) URL: a parseable http/https URL with no userinfo and no
+ * token/session/signed query param (decoded name check). Used at BOTH ingest (sanitizeHttpFact) and read
+ * (buildStreamResponse) so a tokenized URL can neither enter the corpus nor be served if one ever slips in.
+ */
+export function isPublicHttpUrl(raw: unknown): boolean {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_URL_LEN) return false;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  if (u.username || u.password) return false; // userinfo (user:pass@)
+  for (const name of u.searchParams.keys()) if (TOKEN_NAME_RE.test(name)) return false;
+  return true;
+}
+
+export interface CleanHttpFact {
+  url: string;
+  quality: string | null;
+  size: number | null;
+  source: string | null;
+}
+/**
+ * Reduce an HTTP/direct contribution to a STABLE PUBLIC stream fact, or null. The federation rule is
+ * "HTTP/direct = stable public URLs only": we reject non-http(s) schemes, userinfo (user:pass@), and any
+ * token/session query param, so the common tokenized-link shapes can never enter the corpus.
+ *
+ * HONEST LIMIT (documented, not pretended): a token embedded in the URL PATH (or an obfuscated param name)
+ * is undetectable by inspection. The deeper defenses are the same as for the cache: only signed non-barred
+ * nodes contribute, a bad/expired URL fails for the next user and is reportable, and reporting penalizes
+ * the contributor. Do NOT present this guard as a complete tokenized-URL filter.
+ */
+export function sanitizeHttpFact(raw: Record<string, unknown>): CleanHttpFact | null {
+  const url = typeof raw.url === "string" ? raw.url.trim() : "";
+  if (!isPublicHttpUrl(url)) return null;
+  return {
+    url: new URL(url).href, // canonicalized (dedupes case/port/encoding variants)
+    quality: matchOrNull(raw.quality, QUALITY_RE),
+    size: asInt(raw.size),
+    source: matchOrNull(raw.source, SOURCE_RE),
+  };
+}
+
+export interface CleanNzbFact {
+  nzbHash: string;
+  quality: string | null;
+  size: number | null;
+  source: string | null;
+  service: string | null;
+  cached: boolean;
+}
+/**
+ * Reduce an NZB/Usenet contribution to facts, or null. We store the nzb hash + which usenet service has
+ * it cached (boolean), never the .nzb body, indexer apikey, or NNTP creds. Playback is resolved on-device
+ * with the user's own provider, so no token ever reaches the corpus.
+ */
+export function sanitizeNzbFact(raw: Record<string, unknown>): CleanNzbFact | null {
+  const hash = typeof raw.nzbHash === "string" ? raw.nzbHash.trim().toLowerCase() : "";
+  if (!HEX32.test(hash)) return null;
+  return {
+    nzbHash: hash,
+    quality: matchOrNull(raw.quality, QUALITY_RE),
+    size: asInt(raw.size),
+    source: matchOrNull(raw.source, SOURCE_RE),
+    service: matchOrNull(typeof raw.service === "string" ? raw.service.toLowerCase() : raw.service, SERVICE_RE),
+    cached: raw.cached === true,
+  };
+}
+
 /** A cache claim is trusted only after MIN_CONFIRMATIONS independent nodes confirm, OR own debrid does. */
 export function isCacheTrusted(opts: { confirmations: number; ownDebridConfirmed?: boolean }): boolean {
   if (opts.ownDebridConfirmed) return true;
@@ -132,28 +211,39 @@ export function parseMetaId(id: string): ParsedMetaId {
   };
 }
 
-// A corpus row already joined with its cache + health + trust facts, ready to render.
+export type SourceKind = "torrent" | "http" | "nzb";
+
+// A corpus row already joined with its cache + health + trust facts, ready to render. A row is one of
+// three kinds; `kind` may be omitted and is inferred (url -> http, nzbHash -> nzb, else torrent).
 export interface CorpusStream {
-  infoHash: string;
+  kind?: SourceKind;
+  infoHash?: string; // torrent: btih
+  url?: string; // http: a STABLE PUBLIC stream URL (never tokenized)
+  nzbHash?: string; // nzb: the .nzb hash, resolved on-device with the user's usenet provider
   quality: string | null;
   size: number | null;
   source: string | null;
   seeders: number | null;
   cachedOn: string[]; // services known-cached AND trusted
-  trusted: boolean; // torrent-level trust (>=3 nodes or own debrid)
+  trusted: boolean; // source-level trust (>=3 nodes or own debrid)
   lastVerified: number; // epoch ms of the freshest fact backing this row
   fileIdx?: number | null;
 }
 
-// A Stremio stream object. NOTE: deliberately no `url` field - we return `infoHash` and the client
-// mints the magnet / resolves debrid with its own token. This is the facts-never-tokens invariant
-// expressed in the type itself.
+// A Stremio stream object. A torrent carries `infoHash` (the client mints the magnet / resolves debrid
+// with its own token); an HTTP source carries a public `url`; an NZB source carries neither (the VortX
+// app resolves it on-device from the hash in behaviorHints). No tokenized url ever appears here.
 export interface StremioStream {
   name: string;
   title: string;
-  infoHash: string;
+  infoHash?: string;
+  url?: string;
   fileIdx?: number;
   behaviorHints?: Record<string, unknown>;
+}
+
+function kindOf(s: CorpusStream): SourceKind {
+  return s.kind ?? (s.url ? "http" : s.nzbHash ? "nzb" : "torrent");
 }
 
 const SERVICE_LABELS: Record<string, string> = {
@@ -172,7 +262,9 @@ function humanSize(bytes: number | null): string {
 }
 
 function streamTitle(s: CorpusStream): string {
-  const head = [s.quality || "SD", humanSize(s.size)].filter(Boolean).join(" • ");
+  const kind = kindOf(s);
+  const badge = kind === "http" ? "HTTP " : kind === "nzb" ? "NZB " : "";
+  const head = `${badge}${[s.quality || "SD", humanSize(s.size)].filter(Boolean).join(" • ")}`;
   const tags: string[] = [];
   if (s.cachedOn.length) tags.push(`⚡ Cached: ${s.cachedOn.map((x) => SERVICE_LABELS[x] || x).join(", ")}`);
   if (s.seeders && s.seeders > 0) tags.push(`🌱 ${s.seeders}`);
@@ -182,15 +274,20 @@ function streamTitle(s: CorpusStream): string {
 }
 
 /**
- * Turn corpus rows into a Stremio stream response. Surfaces only trusted + fresh facts, drops dead
- * swarms that are not cached anywhere, ranks cached ahead of uncached then by seeders, and emits
- * infohash-only stream objects (no url, no token).
+ * Turn corpus rows into a Stremio stream response. Surfaces only trusted + fresh facts; drops dead
+ * uncached torrent swarms (HTTP + NZB are always resolvable so they are kept); ranks cached ahead of
+ * uncached then by seeders; and emits the right shape per kind: torrent -> infoHash, http -> public url,
+ * nzb -> an on-device-resolve marker. No tokenized url ever appears.
  */
 export function buildStreamResponse(rows: CorpusStream[], now: number): { streams: StremioStream[] } {
   const shown = rows
     .filter((s) => s.trusted)
     .filter((s) => isFresh(s.lastVerified, now))
-    .filter((s) => s.cachedOn.length > 0 || (s.seeders ?? 0) > 0); // dead-swarm uncached -> drop
+    // Dead-swarm drop applies ONLY to torrents; an HTTP URL and an NZB are resolvable without seeders.
+    .filter((s) => kindOf(s) !== "torrent" || s.cachedOn.length > 0 || (s.seeders ?? 0) > 0)
+    // Defense in depth: never serve an http row whose url is not a stable public URL (catches anything
+    // that slipped past ingest, or a future write-path regression).
+    .filter((s) => kindOf(s) !== "http" || isPublicHttpUrl(s.url));
   shown.sort((a, b) => {
     const ac = a.cachedOn.length > 0 ? 1 : 0;
     const bc = b.cachedOn.length > 0 ? 1 : 0;
@@ -198,13 +295,21 @@ export function buildStreamResponse(rows: CorpusStream[], now: number): { stream
     return (b.seeders ?? 0) - (a.seeders ?? 0); // then by seeders
   });
   const streams: StremioStream[] = shown.map((s) => {
+    const kind = kindOf(s);
     const out: StremioStream = {
       name: "Singularity",
       title: streamTitle(s),
-      infoHash: s.infoHash,
-      behaviorHints: { bingeGroup: `singularity-${s.quality || "sd"}` },
+      behaviorHints: { bingeGroup: `singularity-${kind}-${s.quality || "sd"}` },
     };
-    if (typeof s.fileIdx === "number") out.fileIdx = s.fileIdx;
+    if (kind === "http" && s.url) {
+      out.url = s.url; // a stable PUBLIC url (tokenless, guaranteed by sanitizeHttpFact at ingest)
+    } else if (kind === "nzb" && s.nzbHash) {
+      // No playable url here: the VortX app resolves the nzb on-device with the user's own provider.
+      out.behaviorHints = { ...out.behaviorHints, singularityNzb: s.nzbHash };
+    } else if (s.infoHash) {
+      out.infoHash = s.infoHash; // torrent: client mints the magnet / resolves debrid with its own token
+      if (typeof s.fileIdx === "number") out.fileIdx = s.fileIdx;
+    }
     return out;
   });
   return { streams };

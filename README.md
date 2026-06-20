@@ -76,10 +76,18 @@ fetchers are the next build phases (the schema + manifest + routing ship now).
 
 ## Corpus tables (`schema.sql`)
 
-`nodes` (trust/penalty), `torrents` (infohash -> title index), `cache_facts` + `cache_confirmations`
-(the debrid-cache map with distinct-node trust), `health` (live seeders), `reports` (anti-poisoning
-seam). Idempotent + **non-destructive** - never `DROP`; additive `ALTER`s go in a numbered `migrations/`
-file. See [DEPLOY.md](DEPLOY.md) for the migration discipline.
+The corpus serves **three source kinds** for a title: **torrents**, **direct/HTTP public streams**, and
+**NZB/Usenet**. Tables: `nodes` (trust/penalty), `torrents` (infohash -> title index), `http_streams`
+(stable public URLs -> title; tokenless, safe to play on any client), `nzbs` (nzb-hash -> title; resolved
+on-device with the user's own provider), `cache_facts` + `cache_confirmations` (the debrid/usenet-cache map
+with distinct-node trust - shared by torrent infohashes and nzb hashes), `health` (live torrent seeders),
+`reports` (anti-poisoning seam). Idempotent + **non-destructive** - never `DROP`; additive `ALTER`s go in a
+numbered `migrations/` file. See [DEPLOY.md](DEPLOY.md) for the migration discipline.
+
+Each kind renders to the right Stremio stream shape (`src/corpus.ts` `buildStreamResponse`): a torrent ->
+`infoHash` (the client mints the magnet / resolves debrid with its own token), an HTTP source -> a public
+`url`, an NZB -> an on-device-resolve marker (no url, no token). The facts-not-tokens invariant holds across
+all three.
 
 ## Test
 

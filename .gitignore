@@ -9,6 +9,7 @@ dist/
 .env*
 worker-configuration.d.ts
 
-# os / editor
+# os / editor / tooling
 .DS_Store
 *.log
+.claude/
