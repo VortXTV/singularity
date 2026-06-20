@@ -28,6 +28,7 @@ import {
   buildStreamResponse,
   parseMetaId,
   assembleSyncDelta,
+  buildLeaderboard,
   CACHE_TTL_MS,
   MIN_CONFIRMATIONS,
   type CorpusStream,
@@ -381,6 +382,8 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     if (clean.service && clean.cached) await recordCache(env, clean.infoHash, clean.service, nodeId, now);
     accepted++;
   }
+  // Credit the node for accepted facts (drives the leaderboard / "give to get").
+  if (accepted > 0) await env.DB.prepare("UPDATE nodes SET contributions = contributions + ?, last_seen = ? WHERE id = ?").bind(accepted, now, nodeId).run();
   return json({ accepted, stored: true });
 }
 
@@ -479,6 +482,34 @@ async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
   return json(delta, 200, false);
 }
 
+// Public trust leaderboard (gamify hosting). Top non-barred nodes by contributions; facts only.
+async function handleLeaderboard(env: Env, url: URL): Promise<Response> {
+  const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? "25") || 25));
+  const rows = await env.DB.prepare(
+    "SELECT id, contributions, trust_score, version, created_at, last_seen, banned FROM nodes WHERE banned = 0 ORDER BY contributions DESC, created_at ASC LIMIT ?",
+  )
+    .bind(limit)
+    .all<Record<string, unknown>>();
+  return json({ leaderboard: buildLeaderboard(rows.results ?? [], Date.now()) }, 200, true);
+}
+
+// A node self-reports its software version (signed, same identity proof as contribute). Lightweight: it
+// just refreshes version + last_seen so the dashboard "Nodes" section can show status.
+async function handleTelemetry(req: Request, env: Env, ip: string): Promise<Response> {
+  if (env.RL && !(await env.RL.limit({ key: `telemetry:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const body = await readJSON(req);
+  if (!body) return json({ error: "bad_request" }, 400);
+  const { pubKey, ts, sig, version } = body as { pubKey?: string; ts?: number; sig?: string; version?: string };
+  const ver = typeof version === "string" && /^[\w.\-+]{1,32}$/.test(version) ? version : null;
+  if (typeof pubKey !== "string" || typeof sig !== "string" || typeof ts !== "number") return json({ error: "bad_request" }, 400);
+  const now = Date.now();
+  const nodeId = await verifyNode(pubKey, ts, String(ver ?? ""), sig, now);
+  if (!nodeId) return json({ error: "bad_signature" }, 401);
+  // Only update an already-registered node (telemetry is not a registration path).
+  await env.DB.prepare("UPDATE nodes SET version = COALESCE(?, version), last_seen = ? WHERE id = ?").bind(ver, now, nodeId).run();
+  return json({ ok: true });
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
@@ -506,7 +537,9 @@ export default {
     if (req.method === "GET" && sm) return handleStream(env, decodeURIComponent(sm[1]), decodeURIComponent(sm[2]));
 
     if (req.method === "GET" && path === "/hive/sync") return handleSync(env, url, ip);
+    if (req.method === "GET" && path === "/hive/leaderboard") return handleLeaderboard(env, url);
     if (req.method === "POST" && path === "/hive/contribute") return handleContribute(req, env, ip);
+    if (req.method === "POST" && path === "/hive/telemetry") return handleTelemetry(req, env, ip);
     if (req.method === "POST" && path === "/hive/report") return handleReport(req, env, ip);
 
     return json({ error: "not_found" }, 404);

@@ -16,13 +16,15 @@
 -- cannot claim another's identity. penalties accrue on false cache claims / abusive reports; once a
 -- node is barred, its contributions are dropped and it consumes nothing (invisible to the user).
 CREATE TABLE IF NOT EXISTS nodes (
-  id          TEXT PRIMARY KEY,                 -- sha256(pubkey), hex
-  pubkey      TEXT NOT NULL,                    -- base64 raw Ed25519 public key
-  trust_score INTEGER NOT NULL DEFAULT 0,       -- reputation; good contributors are prioritized (later)
-  penalties   INTEGER NOT NULL DEFAULT 0,       -- false claims / abusive reports
-  banned      INTEGER NOT NULL DEFAULT 0,       -- 1 once barred from the benefits
-  created_at  INTEGER NOT NULL,
-  last_seen   INTEGER NOT NULL
+  id            TEXT PRIMARY KEY,               -- sha256(pubkey), hex
+  pubkey        TEXT NOT NULL,                  -- base64 raw Ed25519 public key
+  trust_score   INTEGER NOT NULL DEFAULT 0,     -- reputation; good contributors are prioritized (later)
+  penalties     INTEGER NOT NULL DEFAULT 0,     -- false claims / abusive reports
+  banned        INTEGER NOT NULL DEFAULT 0,     -- 1 once barred from the benefits
+  contributions INTEGER NOT NULL DEFAULT 0,     -- accepted facts contributed (drives the leaderboard)
+  version       TEXT,                           -- node software version (self-reported via /hive/telemetry)
+  created_at    INTEGER NOT NULL,
+  last_seen     INTEGER NOT NULL
 );
 
 -- Torrent index: which infohash serves which title/episode. Infohash metadata only. added_at is touched

@@ -151,5 +151,18 @@ console.log("federation delta-sync");
   ok(!blob.includes("node_id") && !blob.includes("pubkey") && !blob.includes("token"), "sync delta carries facts only (no node ids / pubkeys / tokens)");
 }
 
+console.log("leaderboard + telemetry");
+{
+  const lb = await get("/hive/leaderboard");
+  ok(lb.status === 200 && Array.isArray(lb.json?.leaderboard), "GET /hive/leaderboard returns entries");
+  ok(!JSON.stringify(lb.json).toLowerCase().includes("pubkey"), "leaderboard carries no pubkeys");
+  const node = await newNode();
+  await contribute(node, [{ metaId: "tt0111161", infoHash: "f".repeat(40), quality: "1080p", source: "x", seeders: 1 }]); // register the node
+  const ts = Date.now(), version = "1.2.3";
+  const sig = b64(new Uint8Array(await subtle.sign({ name: "Ed25519" }, node.kp.privateKey, te.encode(`${ts}.${version}`))));
+  const r = await fetch(BASE + "/hive/telemetry", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pubKey: node.pubKey, ts, sig, version }) });
+  ok(r.status === 200, "POST /hive/telemetry accepts a signed version report");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

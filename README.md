@@ -41,6 +41,8 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/:config/catalog/:type/:id.json` | none | Trending (live) + recommendation rows (recs engine WIP - responds gracefully) |
 | POST | `/hive/contribute` | Ed25519 sig | A node pushes signed facts (torrent index + cache booleans + seeders) |
 | GET | `/hive/sync?since=&limit=` | none | A node pulls corpus facts newer than its cursor (bootstrap + delta-sync; facts only) |
+| GET | `/hive/leaderboard?limit=` | none | Public trust leaderboard (top nodes by contributions; truncated node id, no pubkey) |
+| POST | `/hive/telemetry` | Ed25519 sig | A node self-reports its software version (refreshes status for the dashboard) |
 | POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" report (seam for the penalty system) |
 | GET | `/health` | none | Service status |
 

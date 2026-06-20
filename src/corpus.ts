@@ -493,3 +493,28 @@ export function assembleSyncDelta(
   const cursor = ts.length ? Math.max(...ts) : since;
   return { since, cursor, torrents, cache, health, http, nzb };
 }
+
+// The visible trust leaderboard (gamify hosting - a locked federation decision). Shapes node rows into
+// PUBLIC entries: a truncated node id (never the pubkey), the contribution count, trust score, version,
+// and ages. Banned nodes are excluded. Ranking is done by the query (contributions DESC).
+export interface LeaderboardEntry {
+  node: string;
+  contributions: number;
+  trustScore: number;
+  version: string | null;
+  lastSeenDaysAgo: number;
+  ageDays: number;
+}
+export function buildLeaderboard(rows: Row[], now: number): LeaderboardEntry[] {
+  const day = 86_400_000;
+  return rows
+    .filter((r) => num(r.banned) !== 1)
+    .map((r) => ({
+      node: String(r.id ?? "").slice(0, 12),
+      contributions: num(r.contributions),
+      trustScore: num(r.trust_score),
+      version: typeof r.version === "string" ? r.version : null,
+      lastSeenDaysAgo: Math.round((now - num(r.last_seen)) / day),
+      ageDays: Math.round((now - num(r.created_at)) / day),
+    }));
+}
