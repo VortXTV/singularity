@@ -16,6 +16,16 @@ them cached, and which swarms are alive right now" - the union of every member's
 > **Roadmap:** Singularity is growing from this corpus skeleton into a full **configurable super add-on**
 > (aggregate your own debrid + Usenet + add-ons, with a full filter / regex / dedup / sort / format
 > pipeline) **+ NZB/Usenet** **+ instance-to-instance federation**, pre-installed in VortX.
+>
+> **VortX-first (priority: VortX, then Stremio, then Nuvio), compatible with all three.** Singularity serves
+> a VortX-native manifest at `/manifest.vortx.json` (`vortx-source/1`, `kind=native_vortx`) so the VortX
+> engine consumes it as a first-class native source with its privileged hooks on, and every stream carries a
+> machine-readable `behaviorHints.vortx` side-channel (kind, cached services, seeders, size, resolution,
+> languages, tags, vouch count, season-pack file index, NZB hash) that the engine reads as structured ranking
+> + debrid inputs. The federation `/hive` plane is aligned to the engine's frozen `hive` crate (node id =
+> `base64url(SHA-256(pubkey)[..16])`, the canonical per-fact CacheFact signing bytes). All of this is
+> **additive**: the default `/manifest.json` + the plain `url`/`infoHash`/`fileIdx`/`title` fields stay a valid
+> Stremio (and Nuvio) stream, so the other two clients keep working untouched.
 
 ## The invariant: facts, never tokens
 
@@ -32,7 +42,8 @@ This is the load-bearing legal + privacy property and is covered by tests.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/manifest.json` | none | Base Stremio add-on manifest (stream resource, movie+series, `tt` ids) |
+| GET | `/manifest.json` | none | Base Stremio add-on manifest (stream resource, movie+series, `tt` ids) - the Stremio/Nuvio fallback |
+| GET | `/manifest.vortx.json` | none | VortX-NATIVE manifest (`vortx-source/1`, `kind=native_vortx`) with the engine hooks (hive/debrid/ranking/config) - requested first by VortX |
 | GET | `/configure` | none | The VortX-styled config UI (build your preferences -> a manifest URL) |
 | GET | `/:config/manifest.json` | none | Configured manifest; resources + catalogs reflect your config |
 | GET | `/stream/:type/:id.json` | none | Corpus sources for a title as Stremio streams (trusted + fresh, cached-first, infohash-only) |
@@ -41,7 +52,7 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/catalog/:type/singularity.trending/search=:q.json` | none | Corpus-scoped search: titles matching `:q` (resolved via Cinemeta) that the corpus actually has sources for |
 | GET | `/:config/catalog/:type/:id.json` | none | Trending (live) + recommendation rows (recs engine WIP - responds gracefully) |
 | POST | `/hive/contribute` | Ed25519 sig | A node pushes signed facts (torrent index + cache booleans + seeders) |
-| GET | `/hive/sync?since=&limit=` | none | A node pulls corpus facts newer than its cursor (bootstrap + delta-sync; facts only) |
+| GET | `/hive/sync?since=&limit=` | none | A node pulls corpus facts newer than its cursor (bootstrap + delta-sync). The `cache` channel is engine-native Ed25519-signed CacheFacts the VortX engine can `merge_fact` directly; index channels carry no node attribution |
 | GET | `/hive/leaderboard?limit=` | none | Public trust leaderboard (top nodes by contributions; truncated node id, no pubkey) |
 | GET | `/hive/stats` | none | Public federation health snapshot (aggregate counts only: nodes, corpus size, cache, reports, peers; no ids/titles) |
 | POST | `/hive/telemetry` | Ed25519 sig | A node self-reports its software version (refreshes status for the dashboard) |
