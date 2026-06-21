@@ -33,6 +33,10 @@ import {
   sanitizeSource,
   SOURCE_PROBE_TTL_MS,
   MAX_SOURCES,
+  parseTorznab,
+  scrapedItemToContribution,
+  titleMatches,
+  isAllowedIndexerHost,
   nodeIdFromDigest,
   cacheFactSigningString,
   HIVE_DEBRID_SERVICES,
@@ -74,6 +78,14 @@ export interface Env {
   // vortx-source/1 manifest so the engine treats Singularity as a SIGNED native source. UNSET = manifest is
   // served unsigned (the current default). The key is a Worker secret; the public part (`x`) becomes the keyId.
   MANIFEST_SIGNING_KEY?: string;
+  // Content-moat #1 "VortX Verified Sources" (owner decision "Worker runs the scrapers"). A SECRET JSON array
+  // of operator torznab indexers: [{"name":"...","url":"https://host/api","apikey":"..."}]. The host of each
+  // https url forms the outbound-fetch ALLOWLIST (bounds SSRF); the apikey is server-side only and never
+  // emitted (output is infohash-only). UNSET = scraping is inert. Endpoints + keys live HERE, never in the repo.
+  SCRAPER_INDEXERS?: string;
+  // Shared secret gating POST /hive/scrape (like PULL_SECRET). UNSET = the manual trigger is disabled (404);
+  // the Cron scheduled() scrape still runs if SCRAPER_INDEXERS is set.
+  SCRAPE_SECRET?: string;
 }
 
 const SIG_WINDOW_MS = 5 * 60 * 1000; // reject signed payloads more than 5 min off the clock (anti-replay)
@@ -623,13 +635,16 @@ function handleConfiguredManifest(req: Request, cfg: string): Response {
 }
 // Enrich an imdb id into a Stremio meta via PUBLIC Cinemeta (no key). Best-effort: a failure yields a bare
 // meta so the catalog still renders. Cached at the edge for an hour.
-async function cinemetaMeta(type: string, imdb: string): Promise<{ id: string; type: string; name: string; poster?: string }> {
+async function cinemetaMeta(type: string, imdb: string): Promise<{ id: string; type: string; name: string; poster?: string; year?: number }> {
   const bare = { id: imdb, type, name: imdb };
   try {
     const r = await fetch(`https://v3-cinemeta.strem.io/meta/${type}/${imdb}.json`, { cf: { cacheTtl: 3600, cacheEverything: true } } as RequestInit);
     if (!r.ok) return bare;
-    const j = (await r.json()) as { meta?: { id: string; name: string; poster?: string } };
-    return j?.meta ? { id: j.meta.id, type, name: j.meta.name, poster: j.meta.poster } : bare;
+    const j = (await r.json()) as { meta?: { id: string; name: string; poster?: string; year?: number; releaseInfo?: string } };
+    if (!j?.meta) return bare;
+    // year for the strict scrape title-match: meta.year, else the leading year of releaseInfo ("2020", "2018-2022").
+    const ym = String(j.meta.year ?? j.meta.releaseInfo ?? "").match(/(19|20)\d{2}/);
+    return { id: j.meta.id, type, name: j.meta.name, poster: j.meta.poster, year: ym ? Number(ym[0]) : undefined };
   } catch {
     return bare;
   }
@@ -834,6 +849,160 @@ async function handlePull(req: Request, env: Env, ip: string): Promise<Response>
   return json({ pulled: true, ...summary });
 }
 
+// ============================================================================
+// Content-moat #1: torznab aggregation ("VortX Verified Sources"; owner "Worker runs the scrapers").
+// The Worker queries OPERATOR-ALLOWLISTED torznab indexers server-side and folds results into the corpus.
+// Safety: indexer endpoints+keys are a server SECRET (env.SCRAPER_INDEXERS, never the repo); outbound fetch
+// only to those hosts (bounds SSRF), gossip-grade hardening (https, no userinfo, 8s abort, body cap); the
+// apikey is never emitted; results go through sanitizeContribution -> infohash-only; a strict title/year guard
+// keeps mismatches out; ingest is server-attributed and does NOT call recordTorrentConfirmation (so scraped
+// associations do NOT inflate torrents.sources - they stay sources=1 "unconfirmed" until a real node vouches).
+// ============================================================================
+const SCRAPE_MAX_TITLES = 5; // Cron: scrape at most this many trending movies per run (bounds outbound load)
+const SCRAPE_BODY_CAP = 4 * 1024 * 1024;
+
+interface IndexerCfg { name: string; url: string; apikey: string; host: string }
+
+/** Parse the operator indexer SECRET into validated configs (https only, host = fetch allowlist). */
+function parseIndexers(env: Env): IndexerCfg[] {
+  if (!env.SCRAPER_INDEXERS) return [];
+  let arr: unknown;
+  try {
+    arr = JSON.parse(env.SCRAPER_INDEXERS);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: IndexerCfg[] = [];
+  for (const x of arr.slice(0, 20)) {
+    if (!x || typeof x !== "object") continue;
+    const o = x as Record<string, unknown>;
+    const url = typeof o.url === "string" ? o.url : "";
+    const apikey = typeof o.apikey === "string" ? o.apikey : "";
+    const name = (typeof o.name === "string" ? o.name : "indexer").replace(/[^\w .\-]/g, "").slice(0, 48) || "indexer";
+    let host: string;
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "https:" || u.username || u.password) continue; // https only, no userinfo
+      host = u.hostname;
+    } catch {
+      continue;
+    }
+    out.push({ name, url, apikey, host });
+  }
+  return out;
+}
+
+/** Hardened outbound torznab search fetch (allowlisted host, 8s abort, body cap). apikey stays in the URL,
+ * server-side only, never logged or emitted. Returns the body, or null on any failure. */
+async function fetchTorznab(idx: IndexerCfg, query: string): Promise<string | null> {
+  let target: string;
+  try {
+    const u = new URL(idx.url);
+    u.searchParams.set("t", "search");
+    u.searchParams.set("q", query.slice(0, 200));
+    if (idx.apikey) u.searchParams.set("apikey", idx.apikey);
+    u.searchParams.set("limit", "100");
+    target = u.href;
+  } catch {
+    return null;
+  }
+  if (!isAllowedIndexerHost(target, [idx.host])) return null; // defense-in-depth (host is from idx.url, re-checked)
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const res = await fetch(target, { headers: { accept: "application/rss+xml, application/xml, text/xml, application/json" }, signal: ctl.signal });
+    if (!res.ok) return null;
+    const body = await res.text();
+    return body.length > SCRAPE_BODY_CAP ? null : body;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Store a scraped torrent association (+ live seeders) for a title. Server-attributed: NO confirmation bump
+ * (does not inflate torrents.sources) and NO cache fact (the scraper doesn't know debrid cache). Batched. */
+async function ingestScrapedTorrent(env: Env, clean: ReturnType<typeof sanitizeContribution>, metaId: string, now: number): Promise<void> {
+  if (!clean) return;
+  const stmts = [
+    env.DB.prepare(
+      "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) " +
+        "ON CONFLICT(info_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, torrents.quality), size = COALESCE(excluded.size, torrents.size), " +
+        "source = COALESCE(excluded.source, torrents.source), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), added_at = excluded.added_at",
+    ).bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, clean.languages.length ? clean.languages.join(",") : null, now),
+  ];
+  if (clean.seeders != null) {
+    stmts.push(
+      env.DB.prepare("INSERT INTO health (info_hash, seeders, last_seen) VALUES (?, ?, ?) ON CONFLICT(info_hash) DO UPDATE SET seeders = excluded.seeders, last_seen = excluded.last_seen").bind(clean.infoHash, clean.seeders, now),
+    );
+  }
+  await env.DB.batch(stmts);
+}
+
+/** Scrape one MOVIE title across all configured indexers, ingesting only strict title/year-matched results.
+ * Stops fetching once `deadline` (ms epoch) passes, so a run of slow indexers can never exceed the budget. */
+async function scrapeMovie(env: Env, imdbId: string, indexers: IndexerCfg[], now: number, deadline: number): Promise<{ ingested: number; scanned: number }> {
+  const meta = await cinemetaMeta("movie", imdbId);
+  const title = meta.name;
+  const year = meta.year ?? null;
+  if (!title || title === imdbId) return { ingested: 0, scanned: 0 }; // no usable title -> don't scrape blind
+  let ingested = 0;
+  let scanned = 0;
+  for (const idx of indexers) {
+    if (Date.now() > deadline) break; // wall-clock budget guard (Date.now advances across awaited fetches)
+    const body = await fetchTorznab(idx, title);
+    if (!body) continue;
+    for (const item of parseTorznab(body)) {
+      scanned++;
+      if (!titleMatches(item.title, title, year)) continue; // strict guard: the result must BE this movie
+      const clean = sanitizeContribution(scrapedItemToContribution(item, imdbId, idx.name) ?? {});
+      if (!clean) continue;
+      await ingestScrapedTorrent(env, clean, imdbId, now);
+      ingested++;
+    }
+  }
+  return { ingested, scanned };
+}
+
+// Cron pass: scrape the top-N trending MOVIES (bounded) if indexers are configured. Inert without config.
+async function scheduledScrape(env: Env, now: number): Promise<{ titles: number; ingested: number }> {
+  const indexers = parseIndexers(env);
+  if (indexers.length === 0) return { titles: 0, ingested: 0 };
+  const rows = await env.DB.prepare(
+    "SELECT meta_id, COUNT(*) AS c FROM torrents WHERE meta_id LIKE 'tt%' AND instr(meta_id, ':') = 0 GROUP BY meta_id ORDER BY c DESC LIMIT ?",
+  )
+    .bind(SCRAPE_MAX_TITLES)
+    .all<{ meta_id: string }>();
+  let ingested = 0;
+  let titles = 0;
+  const deadline = now + 20000; // stay well under the Cloudflare Cron wall-clock budget even if indexers are slow
+  for (const r of rows.results ?? []) {
+    if (Date.now() > deadline) break;
+    const got = await scrapeMovie(env, r.meta_id, indexers, now, deadline);
+    ingested += got.ingested;
+    titles++;
+  }
+  return { titles, ingested };
+}
+
+// Ops trigger: scrape a specific movie now. Secret-gated like /hive/pull (404 if SCRAPE_SECRET unset).
+async function handleScrape(req: Request, env: Env, ip: string): Promise<Response> {
+  if (!env.SCRAPE_SECRET) return json({ error: "not_found" }, 404);
+  if (req.headers.get("x-scrape-secret") !== env.SCRAPE_SECRET) return json({ error: "forbidden" }, 403);
+  if (env.RL && !(await env.RL.limit({ key: `scrape:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const body = await readJSON(req);
+  const id = body && typeof body.id === "string" ? body.id.trim().toLowerCase() : "";
+  if (!/^tt\d{6,9}$/.test(id)) return json({ error: "bad_request" }, 400); // movie imdb id only (v1)
+  const indexers = parseIndexers(env);
+  if (indexers.length === 0) return json({ error: "no_indexers" }, 503);
+  const startedAt = Date.now();
+  const got = await scrapeMovie(env, id, indexers, startedAt, startedAt + 25000);
+  console.log("[scrape] manual", JSON.stringify({ id, ...got }));
+  return json({ scraped: true, ...got });
+}
+
 // Public federation health/transparency snapshot: aggregate COUNTS only (no node id / pubkey / title / fact),
 // so it is safe to serve open + edge-cacheable. The COUNTs are bounded by the corpus size; the response is
 // cacheable (third arg) so repeat hits serve from the edge rather than re-running the aggregates.
@@ -997,6 +1166,7 @@ export default {
     if (req.method === "GET" && path === "/hive/stats") return handleStats(env, ip, Date.now());
     if (req.method === "GET" && path === "/sources") return handleSourcesRegistry(env, ip);
     if (req.method === "POST" && path === "/hive/source-probe") return handleSourceProbe(req, env, ip);
+    if (req.method === "POST" && path === "/hive/scrape") return handleScrape(req, env, ip);
     if (req.method === "POST" && path === "/hive/contribute") return handleContribute(req, env, ip);
     if (req.method === "POST" && path === "/hive/telemetry") return handleTelemetry(req, env, ip);
     if (req.method === "POST" && path === "/hive/report") return handleReport(req, env, ip);
@@ -1007,7 +1177,15 @@ export default {
 
   // Cron Trigger entry point (see wrangler.toml [triggers]): pull deltas from allowlisted peers (gossip).
   async scheduled(_controller: unknown, env: Env): Promise<void> {
-    const summary = await pullFromPeers(env, Date.now());
+    const now = Date.now();
+    const summary = await pullFromPeers(env, now);
     console.log("[gossip] scheduled pull", JSON.stringify(summary));
+    // Content-moat #1: scrape the top trending movies from operator-allowlisted indexers (inert without config).
+    try {
+      const scrape = await scheduledScrape(env, now);
+      if (scrape.titles > 0) console.log("[scrape] scheduled", JSON.stringify(scrape));
+    } catch (e) {
+      console.log("[scrape] scheduled failed", String(e));
+    }
   },
 };

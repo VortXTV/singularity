@@ -1295,3 +1295,51 @@ export function isAllowedIndexerHost(rawUrl: unknown, allowHosts: string[]): boo
   if (u.protocol !== "https:" || u.username || u.password) return false;
   return allowHosts.some((h) => u.hostname === h.toLowerCase());
 }
+
+// --- Strict title/year match: a scraped result is ingested under a title ONLY if its release name actually
+// matches that title (+ year). Indexers fuzzy-match, so this guards the corpus from "Some Other Movie" landing
+// under "Some Movie". Pure + bounded; movie-oriented (series episodes are additionally keyed by SxxExx).
+export function normalizeTitleForMatch(s: unknown): string {
+  if (typeof s !== "string") return "";
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip diacritics: e-acute -> e
+    .toLowerCase()
+    .replace(/&/g, " ") // drop "&" (the joiner is a matching stopword anyway; releases vary "and"/"&"/omit)
+    .replace(/['’]/g, "") // straight + curly apostrophes join: don't -> dont
+    .replace(/[^a-z0-9]+/g, " ") // separators/punctuation -> space
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function extractYear(s: unknown): number | null {
+  if (typeof s !== "string") return null;
+  const m = s.match(/\b(19\d{2}|20\d{2})\b/);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * True only if the scraped `releaseTitle` plausibly IS `expectedTitle` (all of the expected title's tokens
+ * appear in the release name) with no conflicting year. A short/ambiguous title (<= 1 significant token, e.g.
+ * "It", "Up") REQUIRES the expected year to be present in the release, so a one-word title can't false-match.
+ */
+export function titleMatches(releaseTitle: unknown, expectedTitle: unknown, expectedYear?: number | null): boolean {
+  const e = normalizeTitleForMatch(expectedTitle);
+  const r = normalizeTitleForMatch(releaseTitle);
+  if (!e || !r) return false;
+  // Filter joiner stopwords from the EXPECTED tokens: release names freely drop/alter "the/of/and/a/an", so
+  // requiring them causes false-negatives + they add little discrimination. Fall back if the title is all-stop.
+  const STOP = new Set(["the", "a", "an", "of", "and"]);
+  const allTokens = e.split(" ").filter((t) => t.length > 0);
+  let eTokens = allTokens.filter((t) => !STOP.has(t));
+  if (eTokens.length === 0) eTokens = allTokens; // all-stopword title (rare) -> use as-is
+  if (eTokens.length === 0) return false;
+  const rTokens = new Set(r.split(" "));
+  if (!eTokens.every((t) => rTokens.has(t))) return false; // every expected token must appear in the release
+  const ry = extractYear(releaseTitle);
+  if (expectedYear) {
+    if (ry && ry !== expectedYear) return false; // a release that names a DIFFERENT year is not this title
+    if (eTokens.length <= 1 && ry !== expectedYear) return false; // ambiguous 1-token title: demand the exact year
+  }
+  return true;
+}

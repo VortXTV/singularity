@@ -37,6 +37,9 @@ import {
   qualityFromTitle,
   scrapedItemToContribution,
   isAllowedIndexerHost,
+  titleMatches,
+  normalizeTitleForMatch,
+  extractYear,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -854,6 +857,19 @@ console.log("torznab aggregation (parse + fact mapping + host allowlist)");
   ok(isAllowedIndexerHost("http://idx.example.com/api", ["idx.example.com"]) === false, "non-https -> false (no plaintext indexer fetch)");
   ok(isAllowedIndexerHost("https://user:pass@idx.example.com/api", ["idx.example.com"]) === false, "userinfo in url -> false");
   ok(isAllowedIndexerHost("https://idx.example.com/api", []) === false, "empty allowlist -> false (no fetch by default)");
+
+  // strict title/year match: the guard that keeps mismatched scraped results out of the corpus
+  ok(extractYear("Some.Movie.2020.1080p") === 2020 && extractYear("no year here") === null, "extractYear");
+  ok(normalizeTitleForMatch("Amélie") === "amelie" && normalizeTitleForMatch("Tom & Jerry's") === "tom jerrys", "normalize strips diacritics, drops &, joins apostrophes");
+  ok(titleMatches("Some.Movie.2020.2160p.WEB", "Some Movie", 2020) === true, "exact title + year -> match");
+  ok(titleMatches("Some.Movie.2019.1080p", "Some Movie", 2020) === false, "a DIFFERENT year in the release -> reject");
+  ok(titleMatches("Some.2020.1080p", "Some Movie", 2020) === false, "missing an expected title token -> reject");
+  ok(titleMatches("Some.Movie.1080p.WEB", "Some Movie", 2020) === true, "multi-token title, no year in release -> still matches (no conflicting year)");
+  ok(titleMatches("It.Follows.2014.1080p", "It", 2017) === false, "ambiguous 1-token title with a different year -> reject");
+  ok(titleMatches("It.2017.1080p.BluRay", "It", 2017) === true, "ambiguous 1-token title with the exact year -> match");
+  ok(titleMatches("It.1080p.WEB", "It", 2017) === false, "ambiguous 1-token title with NO year in release -> reject (too risky)");
+  ok(titleMatches("The.Matrix.1999.1080p", "The Matrix", 1999) === true && titleMatches("Crouching.Tiger.Hidden.Dragon.2000", "Crouching Tiger & Hidden Dragon", 2000) === true, "stopwords (the/&) don't block a real match");
+  ok(titleMatches("Totally.Different.2020", "Some Movie", 2020) === false, "unrelated release -> reject");
 }
 
 // --- manifest signature: a real Ed25519 sign over manifestSigningBytes verifies (engine-mergeable) ---

@@ -214,6 +214,9 @@ console.log("gossip: /hive/pull is disabled unless PULL_SECRET is configured");
   // With no PULL_SECRET set (default), the manual trigger is OFF (404) - not open to the public.
   const r = await fetch(BASE + "/hive/pull", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   ok(r.status === 404, "POST /hive/pull is disabled (404) when PULL_SECRET is unset - gossip runs via cron only");
+  // content-moat #1: POST /hive/scrape is likewise OFF (404) unless SCRAPE_SECRET is configured.
+  const s = await fetch(BASE + "/hive/scrape", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "tt0111161" }) });
+  ok(s.status === 404, "POST /hive/scrape is disabled (404) when SCRAPE_SECRET is unset");
 }
 
 console.log("federation delta-sync");
