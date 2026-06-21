@@ -57,6 +57,7 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/hive/stats` | none | Public federation health snapshot (aggregate counts only: nodes, corpus size, cache, reports, peers; no ids/titles) |
 | GET | `/sources` | none | **VortX Verified Sources** registry: vetted sources ranked by a transparent health score (0-100) from DISTINCT fresh non-barred node probes + a status (healthy/degraded/unstable/down/untested). Aggregate metadata only; `url` is never fetched server-side |
 | POST | `/hive/source-probe` | Ed25519 sig | A node reports a boolean probe verdict for a source (the Worker never probes a source itself). Signs `${sourceId}.${ok}`; an optional `source` object registers the source on first sight (first registrant's metadata wins) |
+| POST | `/hive/scrape` | `x-scrape-secret` | Ops trigger: aggregate a movie (`{id: "tt…"}`) from the operator-allowlisted torznab indexers into the corpus. Disabled (404) unless `SCRAPE_SECRET` is set; the Cron scrapes trending movies automatically when `SCRAPER_INDEXERS` is configured. Output is infohash-only; the indexer apikey stays server-side |
 | POST | `/hive/telemetry` | Ed25519 sig | A node self-reports its software version (refreshes status for the dashboard) |
 | POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" - N distinct reports crowd-reject the claim (demote + penalize + ban) |
 | POST | `/hive/pull` | `x-pull-secret` | Manually trigger the gossip sweep (pull from allowlisted peers). Disabled unless `PULL_SECRET` is set; the Cron Trigger runs it automatically regardless |
@@ -149,6 +150,19 @@ See **[DEPLOY.md](DEPLOY.md)** for the full setup (D1 create, schema apply, `wra
 domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the id into `wrangler.toml` →
 `npx wrangler d1 execute vortx-singularity --remote --file=./schema.sql` → `npx wrangler deploy` → map
 `singularity.vortx.tv`.
+
+## Operator config (secrets, never in this repo)
+
+**VortX Verified Sources (torznab aggregation).** Set these as Worker secrets to activate server-side
+scraping; unset, scraping is inert. The actual indexer endpoints + keys live ONLY here, never in source:
+
+- `SCRAPER_INDEXERS` — a JSON array of torznab indexers: `[{"name":"…","url":"https://host/api","apikey":"…"}]`.
+  Each `url` must be `https` (its host becomes the outbound-fetch allowlist; bounds SSRF). The `apikey` is
+  used server-side only and is never emitted (results are infohash-only). Cap 20 indexers.
+- `SCRAPE_SECRET` — gates `POST /hive/scrape` (404 when unset). Send it as the `x-scrape-secret` header.
+
+The operator is responsible for the legal posture of the indexers they configure; VortX hosts/indexes no
+content (the corpus stores infohash metadata only).
 
 ## Not yet implemented (later federation work)
 
