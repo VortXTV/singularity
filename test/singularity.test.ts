@@ -33,6 +33,10 @@ import {
   sourceStatus,
   buildSourcesRegistry,
   SOURCE_PROBE_TTL_MS,
+  parseTorznab,
+  qualityFromTitle,
+  scrapedItemToContribution,
+  isAllowedIndexerHost,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -816,6 +820,40 @@ console.log("sources registry (sanitize + health score + rank)");
   );
   ok(reg[0].id === "top" && reg[1].id === "mid" && reg[2].id === "new", "registry ranks by health (top > mid > untested)");
   ok(reg[0].health === 100 && reg[2].health === 0 && reg[2].status === "untested", "registry carries health + status");
+}
+
+// --- Torznab aggregation (content-moat #1, "Worker runs the scrapers"): parse + map + host allowlist ---
+console.log("torznab aggregation (parse + fact mapping + host allowlist)");
+{
+  const xml = `<rss><channel>
+    <item><title>Some.Movie.2020.2160p.WEB.x265</title><size>5000000000</size><torznab:attr name="infohash" value="${"a".repeat(40)}"/><torznab:attr name="seeders" value="42"/></item>
+    <item><title><![CDATA[Some.Movie.2020.1080p.BluRay]]></title><enclosure url="magnet:?xt=urn:btih:${"b".repeat(40)}&dn=x"/></item>
+    <item><title>No Hash Item</title><size>123</size></item>
+  </channel></rss>`;
+  const items = parseTorznab(xml);
+  ok(items.length === 2, "parses both items that carry a btih, skips the one with no hash");
+  ok(items[0].infoHash === "a".repeat(40) && items[0].size === 5000000000 && items[0].seeders === 42, "extracts infohash + size + seeders from a torznab:attr item");
+  ok(items[1].infoHash === "b".repeat(40) && items[1].size === null, "extracts the btih from a magnet enclosure (size null when absent)");
+  ok(parseTorznab("") .length === 0 && parseTorznab(null).length === 0 && parseTorznab("<rss>garbage</rss>").length === 0, "malformed/empty input -> [] (never throws)");
+  ok(parseTorznab(`<item> x </item>`.repeat(500), 50).length <= 50, "item count is capped");
+
+  // quality from title
+  ok(qualityFromTitle("Some.Movie.2020.2160p.WEB") === "2160p" && qualityFromTitle("x 4K x") === "2160p", "2160p/4K title -> 2160p");
+  ok(qualityFromTitle("A.1080p.BluRay") === "1080p" && qualityFromTitle("720p.WEB") === "720p", "1080p/720p parsed");
+  ok(qualityFromTitle("Some.Movie.DVDRip") === null, "no resolution token -> null");
+
+  // map a scraped item to a contribution, then through sanitizeContribution -> infohash-only (facts-never-tokens)
+  const contrib = scrapedItemToContribution(items[0], "tt1234567", "RegionalIndexerA");
+  ok(contrib !== null && contrib.infoHash === "a".repeat(40) && contrib.source === "RegionalIndexerA" && contrib.quality === "2160p", "scraped item -> torrent contribution shape");
+  const clean = sanitizeContribution(contrib as Record<string, unknown>);
+  ok(clean !== null && clean.infoHash === "a".repeat(40) && !("url" in (clean as object)), "a scraped contribution sanitizes to an infohash-only fact (no url/token reaches the corpus)");
+
+  // host allowlist (bounds SSRF on the outbound scraper fetch)
+  ok(isAllowedIndexerHost("https://idx.example.com/api?t=search&apikey=SECRET", ["idx.example.com"]) === true, "allowlisted https indexer host -> true");
+  ok(isAllowedIndexerHost("https://evil.example/api", ["idx.example.com"]) === false, "non-allowlisted host -> false");
+  ok(isAllowedIndexerHost("http://idx.example.com/api", ["idx.example.com"]) === false, "non-https -> false (no plaintext indexer fetch)");
+  ok(isAllowedIndexerHost("https://user:pass@idx.example.com/api", ["idx.example.com"]) === false, "userinfo in url -> false");
+  ok(isAllowedIndexerHost("https://idx.example.com/api", []) === false, "empty allowlist -> false (no fetch by default)");
 }
 
 // --- manifest signature: a real Ed25519 sign over manifestSigningBytes verifies (engine-mergeable) ---

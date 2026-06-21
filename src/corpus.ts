@@ -1196,3 +1196,102 @@ export function buildSourcesRegistry(rows: SourceHealthRow[], now: number): Regi
     })
     .sort((a, b) => b.health - a.health || a.name.localeCompare(b.name));
 }
+
+// ============================================================================
+// Torznab aggregation (content-moat #1; owner decision 2026-06-21 "Worker runs the scrapers").
+// The Worker queries OPERATOR-ALLOWLISTED torznab (torrent) indexers server-side and folds the results into
+// the corpus. Safety by construction: the indexer apikey is a server secret and is NEVER emitted; the output
+// is infohash-ONLY (facts-never-tokens holds, exactly like a node contribution); parsing is DEFENSIVE +
+// bounded; the actual indexer endpoints + keys live in operator config, never the public repo. (newznab/usenet
+// is the same shape but needs the .nzb MD5 which isn't in the search response - deferred, see vortx-singularity.)
+// ============================================================================
+export const SCRAPE_MAX_ITEMS = 100; // hard cap on items parsed from one indexer response (anti-DoS on a huge body)
+const TITLE_MAX = 300;
+
+export interface ScrapedItem {
+  title: string;
+  infoHash: string; // canonical 40-hex (normalizeInfoHash applied)
+  size: number | null;
+  seeders: number | null;
+}
+
+/** Pull a btih out of a torznab item: a torznab:attr infohash, or the btih in a magnet xt=urn:btih: link. */
+function infoHashFromItem(item: string): string | null {
+  const attr = item.match(/name="infohash"\s+value="([a-zA-Z0-9]{32,40})"/i) || item.match(/value="([a-zA-Z0-9]{32,40})"\s+name="infohash"/i);
+  if (attr) {
+    const h = normalizeInfoHash(attr[1]);
+    if (h) return h;
+  }
+  const magnet = item.match(/urn:btih:([a-zA-Z0-9]{32,40})/i);
+  return magnet ? normalizeInfoHash(magnet[1]) : null;
+}
+
+/**
+ * Parse a torznab/newznab RSS (XML) response into bounded ScrapedItem[]. Defensive: caps item count + title
+ * length, only emits items that carry a resolvable btih, never throws on malformed input (returns what it can).
+ * Regex-scoped to the well-defined torznab item shape - NOT a general XML parser.
+ */
+export function parseTorznab(body: unknown, max = SCRAPE_MAX_ITEMS): ScrapedItem[] {
+  if (typeof body !== "string" || body.length === 0) return [];
+  const out: ScrapedItem[] = [];
+  const items = body.split(/<item[\s>]/i).slice(1); // each chunk is the body of one <item> ...
+  for (const raw of items) {
+    if (out.length >= max) break;
+    const item = raw.slice(0, 4000); // bound per-item work
+    const infoHash = infoHashFromItem(item);
+    if (!infoHash) continue; // torznab torrent items must carry a btih
+    const titleM = item.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i);
+    const title = (titleM ? titleM[1] : "").trim().slice(0, TITLE_MAX);
+    const sizeM = item.match(/<size>(\d{1,19})<\/size>/i) || item.match(/name="size"\s+value="(\d{1,19})"/i);
+    const seedM = item.match(/name="seeders"\s+value="(\d{1,9})"/i);
+    out.push({
+      title,
+      infoHash,
+      size: sizeM ? Number(sizeM[1]) : null,
+      seeders: seedM ? Number(seedM[1]) : null,
+    });
+  }
+  return out;
+}
+
+/** Extract a canonical resolution from a release title (so scraped torrents sort/bucket correctly). */
+export function qualityFromTitle(title: unknown): string | null {
+  if (typeof title !== "string") return null;
+  const t = title.toLowerCase();
+  if (/\b(2160p|4k|uhd)\b/.test(t)) return "2160p";
+  if (/\b(1080p|fhd)\b/.test(t)) return "1080p";
+  if (/\b720p\b/.test(t)) return "720p";
+  if (/\b480p\b/.test(t)) return "480p";
+  return null;
+}
+
+/**
+ * Map a scraped torznab item to a raw torrent contribution for a title, to be run through sanitizeContribution
+ * (so it lands in the corpus exactly like a node contribution: infohash-only, field-whitelisted). `source` is
+ * the indexer's VortX-generic display name. Returns null if the item has no usable btih.
+ */
+export function scrapedItemToContribution(item: ScrapedItem, metaId: string, source: string): Record<string, unknown> | null {
+  if (!item.infoHash) return null;
+  return {
+    metaId,
+    kind: "torrent",
+    infoHash: item.infoHash,
+    quality: qualityFromTitle(item.title),
+    size: item.size,
+    seeders: item.seeders,
+    source,
+  };
+}
+
+/** Outbound scraper fetches go ONLY to operator-allowlisted indexer hosts (bounds SSRF). https + no userinfo. */
+export function isAllowedIndexerHost(rawUrl: unknown, allowHosts: string[]): boolean {
+  if (typeof rawUrl !== "string" || allowHosts.length === 0) return false;
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.username || u.password) return false;
+  return allowHosts.some((h) => u.hostname === h.toLowerCase());
+}
