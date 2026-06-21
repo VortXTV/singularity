@@ -207,57 +207,50 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
 
   // The corpus serves three kinds for a title: torrents, direct/HTTP public streams, and NZB/Usenet.
   // (LIMITs keep the cache IN-clause below D1's 100 bound-parameter cap: 50 torrent + 30 nzb hashes = 80.)
-  const torrents = (
-    seasonId
-      ? await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, episodes, added_at FROM torrents WHERE meta_id IN (?, ?) LIMIT 50")
-          .bind(metaId, seasonId)
-          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; episodes: string | null; added_at: number }>()
-      : await env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, episodes, added_at FROM torrents WHERE meta_id = ? LIMIT 50")
-          .bind(metaId)
-          .all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; episodes: string | null; added_at: number }>()
-  ).results ?? [];
-  const httpRows = (
+  // The three base reads are INDEPENDENT, so run them as ONE concurrent batch (1 round-trip of latency, not
+  // 3) - this is the user-facing hot path. The cache + health reads below depend on these rows, so they form
+  // a second concurrent pair. D1 round-trips dominate latency here, so parallelizing is the main perf lever.
+  const torrentStmt = seasonId
+    ? env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, episodes, added_at FROM torrents WHERE meta_id IN (?, ?) LIMIT 50").bind(metaId, seasonId)
+    : env.DB.prepare("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, sources, episodes, added_at FROM torrents WHERE meta_id = ? LIMIT 50").bind(metaId);
+  const [torrentsR, httpR, nzbR] = await Promise.all([
+    torrentStmt.all<{ info_hash: string; meta_id: string; quality: string | null; size: number | null; source: string | null; file_idx: number | null; tags: string | null; languages: string | null; sources: number | null; episodes: string | null; added_at: number }>(),
     // Only HTTP URLs confirmed by >= MIN_CONFIRMATIONS distinct nodes are surfaced (gated like the cache).
-    await env.DB.prepare("SELECT url, quality, size, source, tags, languages, added_at FROM http_streams WHERE meta_id = ? AND confirmations >= ? LIMIT 30")
-      .bind(metaId, MIN_CONFIRMATIONS)
-      .all<{ url: string; quality: string | null; size: number | null; source: string | null; tags: string | null; languages: string | null; added_at: number }>()
-  ).results ?? [];
-  const nzbRows = (
-    await env.DB.prepare("SELECT nzb_hash, quality, size, source, tags, languages, added_at FROM nzbs WHERE meta_id = ? LIMIT 30")
-      .bind(metaId)
-      .all<{ nzb_hash: string; quality: string | null; size: number | null; source: string | null; tags: string | null; languages: string | null; added_at: number }>()
-  ).results ?? [];
+    env.DB.prepare("SELECT url, quality, size, source, tags, languages, added_at FROM http_streams WHERE meta_id = ? AND confirmations >= ? LIMIT 30").bind(metaId, MIN_CONFIRMATIONS).all<{ url: string; quality: string | null; size: number | null; source: string | null; tags: string | null; languages: string | null; added_at: number }>(),
+    env.DB.prepare("SELECT nzb_hash, quality, size, source, tags, languages, added_at FROM nzbs WHERE meta_id = ? LIMIT 30").bind(metaId).all<{ nzb_hash: string; quality: string | null; size: number | null; source: string | null; tags: string | null; languages: string | null; added_at: number }>(),
+  ]);
+  const torrents = torrentsR.results ?? [];
+  const httpRows = httpR.results ?? [];
+  const nzbRows = nzbR.results ?? [];
   if (torrents.length === 0 && httpRows.length === 0 && nzbRows.length === 0) return json({ streams: [] }, 200, true);
 
   // Cache facts cover both torrent infohashes and nzb hashes (shared trust tables); health is torrent-only.
   const torrentHashes = torrents.map((r) => r.info_hash);
   const cacheHashes = [...torrentHashes, ...nzbRows.map((r) => r.nzb_hash)].slice(0, 95);
+  // cache (torrent + nzb hashes) and health (torrent only) are independent of each other -> one concurrent
+  // pair (1 round-trip). Each is null when it has nothing to look up, so an empty corpus stays cheap.
+  const cachePh = cacheHashes.map(() => "?").join(",");
+  const healthPh = torrentHashes.map(() => "?").join(",");
+  const [cachesR, healthsR] = await Promise.all([
+    cacheHashes.length > 0
+      ? env.DB.prepare(`SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE info_hash IN (${cachePh})`).bind(...cacheHashes).all<{ info_hash: string; service: string; cached: number; confirmations: number; last_verified: number }>()
+      : Promise.resolve({ results: [] as { info_hash: string; service: string; cached: number; confirmations: number; last_verified: number }[] }),
+    torrentHashes.length > 0
+      ? env.DB.prepare(`SELECT info_hash, seeders, last_seen FROM health WHERE info_hash IN (${healthPh})`).bind(...torrentHashes).all<{ info_hash: string; seeders: number | null; last_seen: number }>()
+      : Promise.resolve({ results: [] as { info_hash: string; seeders: number | null; last_seen: number }[] }),
+  ]);
   const cacheByHash = new Map<string, string[]>();
-  if (cacheHashes.length > 0) {
-    const ph = cacheHashes.map(() => "?").join(",");
-    const caches = await env.DB.prepare(
-      `SELECT info_hash, service, cached, confirmations, last_verified FROM cache_facts WHERE info_hash IN (${ph})`,
-    )
-      .bind(...cacheHashes)
-      .all<{ info_hash: string; service: string; cached: number; confirmations: number; last_verified: number }>();
-    for (const c of caches.results ?? []) {
-      if (c.cached !== 1) continue;
-      // Server-side trust = the 3-distinct-node gate + TTL freshness. The "own debrid" short-circuit in
-      // isCacheTrusted is a READER-side concern - the server can't know the reader's debrid, so never passes it.
-      if (!isCacheTrusted({ confirmations: c.confirmations }) || !isFresh(c.last_verified, now)) continue;
-      const list = cacheByHash.get(c.info_hash) ?? [];
-      list.push(c.service);
-      cacheByHash.set(c.info_hash, list);
-    }
+  for (const c of cachesR.results ?? []) {
+    if (c.cached !== 1) continue;
+    // Server-side trust = the 3-distinct-node gate + TTL freshness. The "own debrid" short-circuit in
+    // isCacheTrusted is a READER-side concern - the server can't know the reader's debrid, so never passes it.
+    if (!isCacheTrusted({ confirmations: c.confirmations }) || !isFresh(c.last_verified, now)) continue;
+    const list = cacheByHash.get(c.info_hash) ?? [];
+    list.push(c.service);
+    cacheByHash.set(c.info_hash, list);
   }
   const healthByHash = new Map<string, { seeders: number | null; last_seen: number }>();
-  if (torrentHashes.length > 0) {
-    const ph = torrentHashes.map(() => "?").join(",");
-    const healths = await env.DB.prepare(`SELECT info_hash, seeders, last_seen FROM health WHERE info_hash IN (${ph})`)
-      .bind(...torrentHashes)
-      .all<{ info_hash: string; seeders: number | null; last_seen: number }>();
-    for (const h of healths.results ?? []) healthByHash.set(h.info_hash, { seeders: h.seeders, last_seen: h.last_seen });
-  }
+  for (const h of healthsR.results ?? []) healthByHash.set(h.info_hash, { seeders: h.seeders, last_seen: h.last_seen });
 
   // Honor the user's configured service lists: only surface cache status for services they actually use.
   const allowDebrid = (svc: string) => !config || config.debridServices.length === 0 || config.debridServices.includes(svc);
@@ -332,19 +325,14 @@ async function recordCache(env: Env, hash: string, service: string, nodeId: stri
   // Defensive: only a 40-hex torrent btih or a 32-hex nzb MD5 may key the trust tables (matches the
   // schema CHECK), so a malformed hash from any future call-site can never pollute cache counts.
   if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(hash)) return;
-  await env.DB.prepare(
-    "INSERT INTO cache_confirmations (info_hash, service, node_id, ts) VALUES (?, ?, ?, ?) " +
-      "ON CONFLICT(info_hash, service, node_id) DO UPDATE SET ts = excluded.ts",
-  )
-    .bind(hash, service, nodeId, now)
-    .run();
-  const cnt = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM cache_confirmations cc JOIN nodes n ON n.id = cc.node_id " +
-      "WHERE cc.info_hash = ? AND cc.service = ? AND n.banned = 0 AND cc.ts > ?",
-  )
-    .bind(hash, service, now - CACHE_TTL_MS)
-    .first<{ n: number }>();
-  const n = cnt?.n ?? 1;
+  // INSERT the confirmation + read the recomputed distinct-node count in ONE transaction (one round-trip, not
+  // two); the count sees the just-inserted row. n is kept in JS because it drives both the cache_facts value
+  // and the vindication branch below.
+  const batched = await env.DB.batch([
+    env.DB.prepare("INSERT INTO cache_confirmations (info_hash, service, node_id, ts) VALUES (?, ?, ?, ?) ON CONFLICT(info_hash, service, node_id) DO UPDATE SET ts = excluded.ts").bind(hash, service, nodeId, now),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM cache_confirmations cc JOIN nodes n ON n.id = cc.node_id WHERE cc.info_hash = ? AND cc.service = ? AND n.banned = 0 AND cc.ts > ?").bind(hash, service, now - CACHE_TTL_MS),
+  ]);
+  const n = (batched[1].results?.[0] as { n: number } | undefined)?.n ?? 1;
   await env.DB.prepare(
     "INSERT INTO cache_facts (info_hash, service, cached, confirmations, last_verified) VALUES (?, ?, 1, ?, ?) " +
       "ON CONFLICT(info_hash, service) DO UPDATE SET cached = 1, confirmations = excluded.confirmations, last_verified = excluded.last_verified",
@@ -421,42 +409,28 @@ async function recordSignedCacheFact(
 // confirmation for (url, title), recompute the non-barred fresh count, and store it on http_streams.
 // handleStream only surfaces a URL once that count reaches MIN_CONFIRMATIONS.
 async function recordHttpConfirmation(env: Env, url: string, metaId: string, nodeId: string, now: number): Promise<void> {
-  await env.DB.prepare(
-    "INSERT INTO http_confirmations (url, meta_id, node_id, ts) VALUES (?, ?, ?, ?) " +
-      "ON CONFLICT(url, meta_id, node_id) DO UPDATE SET ts = excluded.ts",
-  )
-    .bind(url, metaId, nodeId, now)
-    .run();
-  const cnt = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM http_confirmations hc JOIN nodes n ON n.id = hc.node_id " +
-      "WHERE hc.url = ? AND hc.meta_id = ? AND n.banned = 0 AND hc.ts > ?",
-  )
-    .bind(url, metaId, now - CACHE_TTL_MS)
-    .first<{ n: number }>();
-  await env.DB.prepare("UPDATE http_streams SET confirmations = ? WHERE url = ? AND meta_id = ?")
-    .bind(cnt?.n ?? 1, url, metaId)
-    .run();
+  // INSERT the confirmation + recompute the stored count in ONE transaction (one round-trip, not three): the
+  // UPDATE's correlated subquery sees the row just inserted, so confirmations reflects this contribution.
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO http_confirmations (url, meta_id, node_id, ts) VALUES (?, ?, ?, ?) ON CONFLICT(url, meta_id, node_id) DO UPDATE SET ts = excluded.ts").bind(url, metaId, nodeId, now),
+    env.DB.prepare(
+      "UPDATE http_streams SET confirmations = (SELECT COUNT(*) FROM http_confirmations hc JOIN nodes n ON n.id = hc.node_id WHERE hc.url = ? AND hc.meta_id = ? AND n.banned = 0 AND hc.ts > ?) WHERE url = ? AND meta_id = ?",
+    ).bind(url, metaId, now - CACHE_TTL_MS, url, metaId),
+  ]);
 }
 
 // Anti-fake-infohash: record a DISTINCT-node confirmation for a torrent (infoHash -> title) association and
 // store the non-barred fresh count as torrents.sources. A fake association from one node stays at sources=1;
 // readers who set minSourceNodes>1 then filter it out, while a real torrent the crowd vouches for survives.
 async function recordTorrentConfirmation(env: Env, infoHash: string, metaId: string, nodeId: string, now: number): Promise<void> {
-  await env.DB.prepare(
-    "INSERT INTO torrent_confirmations (info_hash, meta_id, node_id, ts) VALUES (?, ?, ?, ?) " +
-      "ON CONFLICT(info_hash, meta_id, node_id) DO UPDATE SET ts = excluded.ts",
-  )
-    .bind(infoHash, metaId, nodeId, now)
-    .run();
-  const cnt = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM torrent_confirmations tc JOIN nodes n ON n.id = tc.node_id " +
-      "WHERE tc.info_hash = ? AND tc.meta_id = ? AND n.banned = 0 AND tc.ts > ?",
-  )
-    .bind(infoHash, metaId, now - CACHE_TTL_MS)
-    .first<{ n: number }>();
-  await env.DB.prepare("UPDATE torrents SET sources = ? WHERE info_hash = ? AND meta_id = ?")
-    .bind(cnt?.n ?? 1, infoHash, metaId)
-    .run();
+  // INSERT + recompute torrents.sources in ONE transaction (one round-trip, not three); the subquery sees the
+  // just-inserted confirmation so the distinct-non-barred-fresh count is correct.
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO torrent_confirmations (info_hash, meta_id, node_id, ts) VALUES (?, ?, ?, ?) ON CONFLICT(info_hash, meta_id, node_id) DO UPDATE SET ts = excluded.ts").bind(infoHash, metaId, nodeId, now),
+    env.DB.prepare(
+      "UPDATE torrents SET sources = (SELECT COUNT(*) FROM torrent_confirmations tc JOIN nodes n ON n.id = tc.node_id WHERE tc.info_hash = ? AND tc.meta_id = ? AND n.banned = 0 AND tc.ts > ?) WHERE info_hash = ? AND meta_id = ?",
+    ).bind(infoHash, metaId, now - CACHE_TTL_MS, infoHash, metaId),
+  ]);
 }
 
 async function handleContribute(req: Request, env: Env, ip: string): Promise<Response> {
