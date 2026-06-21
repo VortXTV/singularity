@@ -55,6 +55,8 @@ This is the load-bearing legal + privacy property and is covered by tests.
 | GET | `/hive/sync?since=&limit=` | none | A node pulls corpus facts newer than its cursor (bootstrap + delta-sync). The `cache` channel is engine-native Ed25519-signed CacheFacts the VortX engine can `merge_fact` directly; index channels carry no node attribution |
 | GET | `/hive/leaderboard?limit=` | none | Public trust leaderboard (top nodes by contributions; truncated node id, no pubkey) |
 | GET | `/hive/stats` | none | Public federation health snapshot (aggregate counts only: nodes, corpus size, cache, reports, peers; no ids/titles) |
+| GET | `/sources` | none | **VortX Verified Sources** registry: vetted sources ranked by a transparent health score (0-100) from DISTINCT fresh non-barred node probes + a status (healthy/degraded/unstable/down/untested). Aggregate metadata only; `url` is never fetched server-side |
+| POST | `/hive/source-probe` | Ed25519 sig | A node reports a boolean probe verdict for a source (the Worker never probes a source itself). Signs `${sourceId}.${ok}`; an optional `source` object registers the source on first sight (first registrant's metadata wins) |
 | POST | `/hive/telemetry` | Ed25519 sig | A node self-reports its software version (refreshes status for the dashboard) |
 | POST | `/hive/report` | Ed25519 node id | "Showed cached but was not" - N distinct reports crowd-reject the claim (demote + penalize + ban) |
 | POST | `/hive/pull` | `x-pull-secret` | Manually trigger the gossip sweep (pull from allowlisted peers). Disabled unless `PULL_SECRET` is set; the Cron Trigger runs it automatically regardless |

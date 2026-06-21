@@ -29,6 +29,10 @@ import {
   buildManifest,
   buildNativeManifest,
   manifestSigningBytes,
+  buildSourcesRegistry,
+  sanitizeSource,
+  SOURCE_PROBE_TTL_MS,
+  MAX_SOURCES,
   nodeIdFromDigest,
   cacheFactSigningString,
   HIVE_DEBRID_SERVICES,
@@ -909,6 +913,84 @@ async function handleTelemetry(req: Request, env: Env, ip: string): Promise<Resp
   return json({ ok: true });
 }
 
+// VortX Verified Sources: the public health-scored source registry (content-moat #2). Aggregate read only -
+// source metadata + a transparent health score from DISTINCT fresh non-barred node probes. No node ids, no
+// secrets; `url` is metadata the Worker never fetches. Edge-cacheable; per-IP capped (one GROUP-BY join).
+async function handleSourcesRegistry(env: Env, ip: string): Promise<Response> {
+  if (env.RL && !(await env.RL.limit({ key: `sources:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const now = Date.now();
+  const rows = await env.DB.prepare(
+    "SELECT s.id, s.name, s.kind, s.category, s.url, s.added_at AS addedAt, " +
+      "COUNT(DISTINCT CASE WHEN sp.ok = 1 THEN sp.node_id END) AS okNodes, " +
+      "COUNT(DISTINCT sp.node_id) AS totalNodes, " +
+      "MAX(CASE WHEN sp.ok = 1 THEN sp.ts END) AS lastOk, " +
+      "MAX(sp.ts) AS lastTested " +
+      "FROM sources s LEFT JOIN source_probes sp ON sp.source_id = s.id AND sp.ts > ? " +
+      "AND sp.node_id IN (SELECT id FROM nodes WHERE banned = 0) " +
+      "GROUP BY s.id LIMIT 500",
+  )
+    .bind(now - SOURCE_PROBE_TTL_MS)
+    .all<Record<string, unknown>>();
+  const registry = buildSourcesRegistry(
+    (rows.results ?? []).map((r) => ({
+      id: String(r.id),
+      name: String(r.name),
+      kind: String(r.kind),
+      category: String(r.category),
+      url: (r.url as string | null) ?? null,
+      okNodes: Number(r.okNodes ?? 0),
+      totalNodes: Number(r.totalNodes ?? 0),
+      lastOk: r.lastOk == null ? null : Number(r.lastOk),
+      lastTested: r.lastTested == null ? null : Number(r.lastTested),
+      addedAt: Number(r.addedAt ?? 0),
+    })),
+    now,
+  );
+  return json({ sources: registry, count: registry.length, generatedAt: now }, 200, true);
+}
+
+// A node PROBES a source and reports a boolean verdict (Ed25519-signed, same identity proof as a contribution;
+// the Worker never probes a source itself -> no SSRF). An optional `source` object registers the source on
+// first sight (first registrant's metadata wins). One latest verdict per (source, node), LWW by ts.
+async function handleSourceProbe(req: Request, env: Env, ip: string): Promise<Response> {
+  if (env.RL && !(await env.RL.limit({ key: `srcprobe:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const body = await readJSON(req);
+  if (!body) return json({ error: "bad_request" }, 400);
+  const now = Date.now();
+  const ok = body.ok === true;
+  // Optional inline registration (sanitized to the field whitelist); else the source must already exist.
+  const reg = body.source && typeof body.source === "object" ? sanitizeSource(body.source as Record<string, unknown>) : null;
+  const sourceId = reg ? reg.id : typeof body.sourceId === "string" ? body.sourceId.trim().toLowerCase() : "";
+  if (!/^[a-z0-9][a-z0-9_-]{1,63}$/.test(sourceId)) return json({ error: "bad_request" }, 400);
+  // Prove control of the probing node's key; the signature binds the source + verdict + ts (5-min anti-replay).
+  const pubKey = typeof body.pubKey === "string" ? body.pubKey : "";
+  const ts = typeof body.ts === "number" ? body.ts : NaN;
+  const sig = typeof body.sig === "string" ? body.sig : "";
+  const prober = await verifyNode(pubKey, ts, `${sourceId}.${ok ? 1 : 0}`, sig, now);
+  if (!prober) return json({ error: "unauthorized" }, 401);
+  const node = await env.DB.prepare("SELECT 1 AS ok FROM nodes WHERE id = ? AND banned = 0").bind(prober).first<{ ok: number }>();
+  if (!node) return json({ error: "unknown_node" }, 403);
+  if (reg) {
+    // Cap the registry so a crowd of nodes can't exhaust D1 with junk sources. A NEW source is refused past
+    // the cap; an EXISTING source (idempotent re-register) and all probing are unaffected.
+    const cnt = await env.DB.prepare("SELECT COUNT(*) AS n FROM sources").first<{ n: number }>();
+    if ((cnt?.n ?? 0) < MAX_SOURCES) {
+      await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, kind, category, url, added_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(reg.id, reg.name, reg.kind, reg.category, reg.url, now)
+        .run();
+    }
+  }
+  const exists = await env.DB.prepare("SELECT 1 AS ok FROM sources WHERE id = ?").bind(sourceId).first<{ ok: number }>();
+  if (!exists) return json({ error: "no_such_source" }, 404);
+  await env.DB.prepare(
+    "INSERT INTO source_probes (source_id, node_id, ok, ts) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(source_id, node_id) DO UPDATE SET ok = excluded.ok, ts = excluded.ts WHERE excluded.ts > source_probes.ts",
+  )
+    .bind(sourceId, prober, ok ? 1 : 0, now)
+    .run();
+  return json({ recorded: true });
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
@@ -939,6 +1021,8 @@ export default {
     if (req.method === "GET" && path === "/hive/sync") return handleSync(env, url, ip);
     if (req.method === "GET" && path === "/hive/leaderboard") return handleLeaderboard(env, url);
     if (req.method === "GET" && path === "/hive/stats") return handleStats(env, ip, Date.now());
+    if (req.method === "GET" && path === "/sources") return handleSourcesRegistry(env, ip);
+    if (req.method === "POST" && path === "/hive/source-probe") return handleSourceProbe(req, env, ip);
     if (req.method === "POST" && path === "/hive/contribute") return handleContribute(req, env, ip);
     if (req.method === "POST" && path === "/hive/telemetry") return handleTelemetry(req, env, ip);
     if (req.method === "POST" && path === "/hive/report") return handleReport(req, env, ip);

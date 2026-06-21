@@ -317,5 +317,21 @@ console.log("report -> crowd-rejection (anti-poisoning)");
   ok(row && /Cached/i.test(row.title), "after 3 FRESH nodes re-confirm, the claim is vindicated + shown cached again (false reporters penalized)");
 }
 
+// VortX Verified Sources: a node registers + probes a source (signed), then GET /sources ranks it by health.
+{
+  const sn = await newNode();
+  await contribute(sn, [{ metaId: "tt0111161", infoHash: "e".repeat(40), quality: "1080p", source: "x", service: "realdebrid", cached: true, seeders: 5 }]); // registers the node
+  const sourceId = "e2e-src";
+  const sts = Date.now();
+  const ssig = b64(new Uint8Array(await subtle.sign({ name: "Ed25519" }, sn.kp.privateKey, te.encode(`${sourceId}.1`))));
+  const r = await fetch(BASE + "/hive/source-probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceId, ok: true, pubKey: sn.pubKey, ts: sts, sig: ssig, source: { id: sourceId, name: "E2E Source", kind: "torrent", category: "test" } }) });
+  ok(r.status === 200, "signed /hive/source-probe (with inline registration) accepted");
+  const r2 = await fetch(BASE + "/hive/source-probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceId, ok: true }) });
+  ok(r2.status === 401, "unsigned /hive/source-probe rejected 401");
+  const reg = await get("/sources");
+  const found = (reg.json?.sources || []).find((s) => s.id === sourceId);
+  ok(found && typeof found.health === "number" && typeof found.status === "string", "GET /sources lists the probed source with a health score + status");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -184,3 +184,27 @@ CREATE TABLE IF NOT EXISTS peers (
   cursor    INTEGER NOT NULL DEFAULT 0,            -- last delta timestamp pulled from this peer
   last_pull INTEGER NOT NULL DEFAULT 0
 );
+
+-- VortX Verified Sources: the health-scored source registry (content-moat #2). A "source" is a scraper/add-on
+-- the corpus aggregates; `url` is METADATA ONLY (displayed, NEVER fetched server-side - no SSRF). Health comes
+-- from nodes PROBING sources and reporting a boolean verdict (the Worker never probes), ranked by a transparent
+-- score over DISTINCT fresh non-barred node probes (mirrors cache_confirmations). GET /sources reads this.
+CREATE TABLE IF NOT EXISTS sources (
+  id        TEXT NOT NULL PRIMARY KEY,             -- stable lowercase slug
+  name      TEXT NOT NULL,
+  kind      TEXT NOT NULL,                         -- torrent | http | nzb (what the source provides)
+  category  TEXT NOT NULL,                         -- VortX-generic region/niche label
+  url       TEXT,                                  -- optional public base/manifest (metadata only, never fetched)
+  added_at  INTEGER NOT NULL
+);
+
+-- One latest probe verdict per (source, node), LWW by ts. The health score counts DISTINCT fresh non-barred
+-- nodes (mirrors the cache/http confirmation trust model), so a single node cannot inflate a source's health.
+CREATE TABLE IF NOT EXISTS source_probes (
+  source_id TEXT NOT NULL,
+  node_id   TEXT NOT NULL,
+  ok        INTEGER NOT NULL,                      -- 1 = node reached the source ok, 0 = failed
+  ts        INTEGER NOT NULL,
+  PRIMARY KEY (source_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_source_probes_src ON source_probes (source_id);

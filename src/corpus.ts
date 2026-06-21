@@ -1109,3 +1109,90 @@ export function buildStats(raw: Record<string, unknown>): CorpusStats {
     peers: n(raw.peers),
   };
 }
+
+// ============================================================================
+// VortX Verified Sources: the health-scored source registry (content-moat #2).
+// A "source" is a scraper/add-on the corpus aggregates. Nodes PROBE sources and report a boolean verdict
+// (the Worker never fetches a source itself -> no SSRF, no load); the registry ranks sources by a transparent
+// health score derived from DISTINCT fresh non-barred node probes (mirrors the cache-confirmation trust model).
+// This is the 10x over a raw plugin list: reliability is a first-class, crowd-verified signal.
+// ============================================================================
+export const SOURCE_PROBE_TTL_MS = CACHE_TTL_MS; // a probe older than this no longer counts toward health
+export const SOURCE_HEALTH_MIN_NODES = 3; // below this many probing nodes the score is confidence-discounted
+export const MAX_SOURCES = 5000; // hard cap on registered sources (anti storage-exhaustion; new registrations refused past it, existing sources keep working)
+const SOURCE_ID_RE = /^[a-z0-9][a-z0-9_-]{1,63}$/; // stable lowercase slug
+const SOURCE_CATEGORY_RE = /^[\w .\-]{1,48}$/; // VortX-generic region/niche label (no rival names - enforced editorially)
+
+export interface CleanSource {
+  id: string;
+  name: string;
+  kind: SourceKind; // what the source provides
+  category: string; // region/niche grouping
+  url: string | null; // optional public base/manifest (METADATA ONLY - never fetched server-side)
+}
+
+/** A source row joined with its aggregated distinct-node probe signals (server-shaped, pre-scoring). */
+export interface SourceHealthRow {
+  id: string;
+  name: string;
+  kind: string;
+  category: string;
+  url: string | null;
+  okNodes: number; // distinct fresh non-barred nodes whose latest verdict was OK
+  totalNodes: number; // distinct fresh non-barred nodes that probed it
+  lastOk: number | null; // ms of the most recent OK probe
+  lastTested: number | null; // ms of the most recent probe (ok or fail)
+  addedAt: number;
+}
+
+export interface RegistrySource extends SourceHealthRow {
+  health: number; // 0..100
+  status: string; // healthy | degraded | unstable | down | untested
+}
+
+/** Reduce an untrusted source registration to the field whitelist, or null if unusable. */
+export function sanitizeSource(raw: Record<string, unknown>): CleanSource | null {
+  const id = typeof raw.id === "string" ? raw.id.trim().toLowerCase() : "";
+  if (!SOURCE_ID_RE.test(id)) return null;
+  const kindRaw = typeof raw.kind === "string" ? raw.kind.toLowerCase() : "";
+  if (!SOURCE_KINDS.includes(kindRaw as SourceKind)) return null;
+  const name = matchOrNull(raw.name, SOURCE_RE);
+  if (!name) return null;
+  const category = matchOrNull(raw.category, SOURCE_CATEGORY_RE) ?? "general";
+  // url is OPTIONAL metadata, validated as a stable public URL (no userinfo/token) but NEVER fetched here.
+  const url = typeof raw.url === "string" && isPublicHttpUrl(raw.url.trim()) ? new URL(raw.url.trim()).href : null;
+  return { id, name, kind: kindRaw as SourceKind, category, url };
+}
+
+/**
+ * Transparent, bounded [0,100] health score from a source's distinct-node probe signals:
+ *   successRate (ok nodes / total) x recency (full credit if a recent OK probe, decaying to 0 over the TTL)
+ *   x a confidence factor (low-probe sources are discounted so a single lucky probe can't read as "healthy").
+ * A source no node has probed (or whose probes all expired) scores 0.
+ */
+export function sourceHealthScore(r: SourceHealthRow, now: number): number {
+  if (r.totalNodes <= 0 || r.lastTested == null) return 0;
+  const successRate = r.okNodes / r.totalNodes; // 0..1
+  const recency = r.lastOk == null ? 0 : Math.max(0, Math.min(1, 1 - (now - r.lastOk) / SOURCE_PROBE_TTL_MS));
+  const confidence = Math.min(1, r.totalNodes / SOURCE_HEALTH_MIN_NODES);
+  const score = 100 * successRate * recency * (0.4 + 0.6 * confidence);
+  return Math.round(Math.max(0, Math.min(100, score)));
+}
+
+export function sourceStatus(health: number, hasProbes: boolean): string {
+  if (!hasProbes) return "untested";
+  if (health >= 70) return "healthy";
+  if (health >= 40) return "degraded";
+  if (health > 0) return "unstable";
+  return "down";
+}
+
+/** Score + rank a set of source rows by health (then name), the public /sources registry shape. */
+export function buildSourcesRegistry(rows: SourceHealthRow[], now: number): RegistrySource[] {
+  return rows
+    .map((r) => {
+      const health = sourceHealthScore(r, now);
+      return { ...r, health, status: sourceStatus(health, r.totalNodes > 0) };
+    })
+    .sort((a, b) => b.health - a.health || a.name.localeCompare(b.name));
+}

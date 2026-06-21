@@ -28,6 +28,11 @@ import {
   buildNativeManifest,
   canonicalizeManifest,
   manifestSigningBytes,
+  sanitizeSource,
+  sourceHealthScore,
+  sourceStatus,
+  buildSourcesRegistry,
+  SOURCE_PROBE_TTL_MS,
   buildStreamResponse,
   parseMetaId,
   metaKey,
@@ -770,6 +775,47 @@ console.log("reConfirmationVindicates (false-reporter counter-signal)");
   ok(reConfirmationVindicates(3, 2) === false, "claim was never crowd-rejected (only 2 reporters) -> no false-reporter penalty");
   ok(reConfirmationVindicates(5, 5) === true, "strong re-confirmation + many reporters still vindicates");
   ok(reConfirmationVindicates(0, 0) === false, "a brand-new claim with no reports never triggers the counter-signal");
+}
+
+// --- VortX Verified Sources: the health-scored source registry (content-moat #2) ---
+console.log("sources registry (sanitize + health score + rank)");
+{
+  // sanitizeSource: field whitelist
+  const good = sanitizeSource({ id: "alpha-srcs", name: "Alpha Sources", kind: "torrent", category: "Regional A", url: "https://alpha.example/manifest.json" });
+  ok(good !== null && good.id === "alpha-srcs" && good.kind === "torrent" && good.url === "https://alpha.example/manifest.json", "valid source registration is accepted");
+  ok(sanitizeSource({ id: "BAD ID!", name: "x", kind: "torrent" }) === null, "rejects a non-slug id");
+  ok(sanitizeSource({ id: "ok", name: "x", kind: "bogus" }) === null, "rejects an unknown kind");
+  ok(sanitizeSource({ id: "ok", kind: "torrent" }) === null, "rejects a source with no name");
+  ok(sanitizeSource({ id: "ok", name: "x", kind: "http", category: "c" })?.category === "c", "keeps a clean category");
+  ok(sanitizeSource({ id: "ok", name: "x", kind: "http" })?.category === "general", "defaults category to general");
+  const tokened = sanitizeSource({ id: "ok", name: "x", kind: "http", url: "https://e.example/m?token=abc" });
+  ok(tokened !== null && tokened.url === null, "drops a tokened url (metadata only, facts-never-tokens) but keeps the source");
+
+  const NOW = 1_700_000_000_000;
+  const row = (over: Record<string, unknown>) => ({ id: "s", name: "S", kind: "torrent", category: "g", url: null, okNodes: 0, totalNodes: 0, lastOk: null, lastTested: null, addedAt: NOW, ...over });
+  // health score: transparent + bounded
+  ok(sourceHealthScore(row({}), NOW) === 0, "no probes -> health 0");
+  ok(sourceHealthScore(row({ okNodes: 3, totalNodes: 3, lastOk: NOW, lastTested: NOW }), NOW) === 100, "3/3 ok + recent + confident -> 100");
+  ok(sourceHealthScore(row({ okNodes: 2, totalNodes: 4, lastOk: NOW, lastTested: NOW }), NOW) === 50, "2/4 ok -> 50 (success rate)");
+  ok(sourceHealthScore(row({ okNodes: 1, totalNodes: 1, lastOk: NOW, lastTested: NOW }), NOW) === 60, "1/1 ok but low confidence (1 node) -> 60, not 100");
+  ok(sourceHealthScore(row({ okNodes: 3, totalNodes: 3, lastOk: NOW - SOURCE_PROBE_TTL_MS / 2, lastTested: NOW }), NOW) === 50, "a half-TTL-old OK probe decays recency to 0.5 -> 50");
+  ok(sourceHealthScore(row({ okNodes: 0, totalNodes: 3, lastOk: null, lastTested: NOW }), NOW) === 0, "all-fail (no OK probe) -> 0");
+
+  // status thresholds
+  ok(sourceStatus(80, true) === "healthy" && sourceStatus(50, true) === "degraded" && sourceStatus(10, true) === "unstable" && sourceStatus(0, true) === "down", "status thresholds");
+  ok(sourceStatus(0, false) === "untested", "a source with no probes is 'untested', not 'down'");
+
+  // buildSourcesRegistry: ranks by health desc, untested last
+  const reg = buildSourcesRegistry(
+    [
+      row({ id: "mid", name: "Mid", okNodes: 2, totalNodes: 4, lastOk: NOW, lastTested: NOW }),
+      row({ id: "top", name: "Top", okNodes: 3, totalNodes: 3, lastOk: NOW, lastTested: NOW }),
+      row({ id: "new", name: "New" }), // untested
+    ],
+    NOW,
+  );
+  ok(reg[0].id === "top" && reg[1].id === "mid" && reg[2].id === "new", "registry ranks by health (top > mid > untested)");
+  ok(reg[0].health === 100 && reg[2].health === 0 && reg[2].status === "untested", "registry carries health + status");
 }
 
 // --- manifest signature: a real Ed25519 sign over manifestSigningBytes verifies (engine-mergeable) ---
