@@ -156,10 +156,10 @@ domain, CI). In short: `npx wrangler d1 create vortx-singularity` → paste the 
 **VortX Verified Sources (torznab aggregation).** Set these as Worker secrets to activate server-side
 scraping; unset, scraping is inert. The actual indexer endpoints + keys live ONLY here, never in source:
 
-- `SCRAPER_INDEXERS` — a JSON array of torznab indexers: `[{"name":"…","url":"https://host/api","apikey":"…"}]`.
+- `SCRAPER_INDEXERS`: a JSON array of torznab indexers: `[{"name":"…","url":"https://host/api","apikey":"…"}]`.
   Each `url` must be `https` (its host becomes the outbound-fetch allowlist; bounds SSRF). The `apikey` is
   used server-side only and is never emitted (results are infohash-only). Cap 20 indexers.
-- `SCRAPE_SECRET` — gates `POST /hive/scrape` (404 when unset). Send it as the `x-scrape-secret` header.
+- `SCRAPE_SECRET`: gates `POST /hive/scrape` (404 when unset). Send it as the `x-scrape-secret` header.
 
 The operator is responsible for the legal posture of the indexers they configure; VortX hosts/indexes no
 content (the corpus stores infohash metadata only).
