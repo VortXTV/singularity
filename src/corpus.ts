@@ -226,10 +226,93 @@ export function sanitizeContribution(raw: Record<string, unknown>): CleanFact | 
 const TOKEN_NAME_RE = /token|key|auth|sig|password|passwd|secret|jwt|session|expires|hmac|policy|signature|credential|nonce|ticket|x-amz|keypair|\bsid\b|\bott\b|\bcode\b/i;
 const MAX_URL_LEN = 2048;
 
+// --- Private-network guard (the FLEET-side SSRF bound) ---------------------------------------------
+// A contributed http/direct URL is STORED and then SERVED to every client as a playable stream, and the
+// CLIENT fetches it. So a URL aimed at a private / loopback / link-local address is not a Worker-side SSRF
+// (the Worker never fetches a stream URL); it is a fleet-side one: a single contributor could point every
+// player at their own LAN, at a router admin page, or at a cloud metadata endpoint. Enforced at BOTH ingest
+// and serve (isPublicHttpUrl is on both paths), so it also covers rows that predate this check.
+//
+// Obfuscated forms are handled by the URL parser itself, not by us: WHATWG URL normalizes 2130706433,
+// 0177.0.0.1, 0x7f.0.0.1 and 127.1 all to "127.0.0.1", and normalizes an IPv4-mapped v6 literal to its hex
+// form ("::ffff:127.0.0.1" -> "::ffff:7f00:1"), which is why the v6 branch decodes the embedded quads.
+//
+// HONEST LIMIT (documented, not pretended): this inspects the URL, so it stops IP LITERALS, not NAMES that
+// RESOLVE to a private address. A public hostname pointing at 169.254.169.254 (a wildcard-DNS name, or an
+// attacker's own A record) still passes, and no amount of parsing fixes that: the resolution happens on the
+// CLIENT, at fetch time, long after this check. The bound on that residual is the same as for the rest of the
+// corpus: only signed non-barred nodes contribute, a bad URL fails visibly for the next user and is
+// reportable, and reporting penalizes the contributor. Do NOT present this as a complete SSRF filter.
+
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+/** True if a dotted-quad is in a private / loopback / link-local / reserved range (fail-closed on junk). */
+function isPrivateIPv4(host: string): boolean {
+  const m = IPV4_RE.exec(host);
+  if (!m) return false; // not a v4 literal; caller handles hostnames
+  const o = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+  if (o.some((n) => n > 255)) return true; // not a real v4 -> refuse rather than guess
+  const [a, b] = o;
+  if (a === 0) return true; // 0.0.0.0/8 "this network"
+  if (a === 10) return true; // 10/8 private
+  if (a === 127) return true; // 127/8 loopback
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
+  if (a === 169 && b === 254) return true; // 169.254/16 link-local (incl. 169.254.169.254 metadata)
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12 private
+  if (a === 192 && b === 0) return true; // 192.0.0/24 IETF protocol assignments
+  if (a === 192 && b === 168) return true; // 192.168/16 private
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18/15 benchmarking
+  if (a >= 224) return true; // 224/4 multicast, 240/4 reserved, 255.255.255.255 broadcast
+  return false;
+}
+
+/** True if a bracketed IPv6 literal ("[::1]") is loopback / unique-local / link-local / v4-mapped-private. */
+function isPrivateIPv6(bracketed: string): boolean {
+  if (!bracketed.startsWith("[") || !bracketed.endsWith("]")) return false;
+  const h = bracketed.slice(1, -1).toLowerCase();
+  // v4-mapped (::ffff:a.b.c.d or the normalized ::ffff:hhhh:hhhh) and NAT64 (64:ff9b::/96) embed a v4
+  // address: decode it and range-check, so ::ffff:169.254.169.254 cannot smuggle metadata access through.
+  const dotted = /^(?:::ffff:|64:ff9b::)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
+  if (dotted) return isPrivateIPv4(dotted[1]);
+  const hex = /^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (hex) {
+    const hi = parseInt(hex[1], 16);
+    const lo = parseInt(hex[2], 16);
+    return isPrivateIPv4(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  }
+  // Anything else in ::/96 is unspecified (::), loopback (::1), or a deprecated IPv4-COMPATIBLE / -translated
+  // form that smuggles a v4 target in the low bits: "::127.0.0.1" normalizes to "::7f00:1" and
+  // "::ffff:0:127.0.0.1" to "::ffff:0:7f00:1", neither of which matches the v4-mapped extraction above. The
+  // whole ::/96 block is reserved/deprecated, so there is no legitimate public URL in it: refuse it wholesale
+  // rather than enumerate the encodings. (Public v4-mapped, e.g. ::ffff:8.8.8.8, is already allowed above.)
+  if (h.startsWith("::")) return true;
+  if (/^2002:/.test(h)) return true; // 2002::/16 6to4 (embeds an arbitrary v4 relay target)
+  if (/^f[cd]/.test(h)) return true; // fc00::/7 unique-local
+  if (/^fe[89ab]/.test(h)) return true; // fe80::/10 link-local
+  if (/^ff/.test(h)) return true; // ff00::/8 multicast
+  return false;
+}
+
 /**
- * True only for a STABLE PUBLIC http(s) URL: a parseable http/https URL with no userinfo and no
- * token/session/signed query param (decoded name check). Used at BOTH ingest (sanitizeHttpFact) and read
- * (buildStreamResponse) so a tokenized URL can neither enter the corpus nor be served if one ever slips in.
+ * True if a URL hostname is not safely public: an internal-only name, a dotless single-label host (a public
+ * stream URL always has a FQDN, an intranet name does not), or a private-range IP literal.
+ */
+export function isPrivateHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  if (h.length === 0) return true;
+  if (h.startsWith("[")) return isPrivateIPv6(h);
+  if (IPV4_RE.test(h)) return isPrivateIPv4(h);
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".home.arpa")) return true;
+  if (!h.includes(".")) return true; // dotless intranet name ("router", "nas")
+  return false;
+}
+
+/**
+ * True only for a STABLE PUBLIC http(s) URL: a parseable http/https URL with no userinfo, no
+ * token/session/signed query param (decoded name check), and no private/loopback/link-local host. Used at
+ * BOTH ingest (sanitizeHttpFact) and read (buildStreamResponse) so a tokenized or private-network URL can
+ * neither enter the corpus nor be served if one ever slips in.
  */
 export function isPublicHttpUrl(raw: unknown): boolean {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_URL_LEN) return false;
@@ -241,6 +324,7 @@ export function isPublicHttpUrl(raw: unknown): boolean {
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return false;
   if (u.username || u.password) return false; // userinfo (user:pass@)
+  if (isPrivateHost(u.hostname)) return false; // private/loopback/link-local: fleet-side SSRF
   for (const name of u.searchParams.keys()) if (TOKEN_NAME_RE.test(name)) return false;
   return true;
 }
@@ -660,7 +744,7 @@ export interface StreamFilterOptions {
 const RES_RANK: Record<string, number> = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1, SD: 0 };
 const resRank = (q: string | null): number => RES_RANK[q ?? "SD"] ?? 0;
 
-/** AIOStreams-class filters: resolution allowlist, max size, min seeders (torrents), exclude-regex. */
+/** User-configurable stream filters: resolution allowlist, max size, min seeders (torrents), exclude-regex. */
 function applyFilters(streams: CorpusStream[], opts: StreamFilterOptions): CorpusStream[] {
   let re: RegExp | null = null;
   if (opts.excludeRegex) {
@@ -1094,8 +1178,8 @@ export interface CorpusStats {
 }
 
 /**
- * Public federation health/transparency snapshot (the data the dashboard Nodes UI reads, and a credibility
- * surface like CometNet's). AGGREGATE COUNTS ONLY - never a node id, pubkey, title, or any fact - so it is a
+ * Public federation health/transparency snapshot (the data the dashboard Nodes UI reads, and a public
+ * credibility surface). AGGREGATE COUNTS ONLY - never a node id, pubkey, title, or any fact - so it is a
  * safe public, edge-cacheable response. Pure shaping: every count is coerced to a non-negative integer so a
  * NULL/garbage SUM (e.g. an empty table) renders as 0, never null.
  */
@@ -1111,7 +1195,7 @@ export function buildStats(raw: Record<string, unknown>): CorpusStats {
 }
 
 // ============================================================================
-// VortX Verified Sources: the health-scored source registry (content-moat #2).
+// VortX Verified Sources: the health-scored source registry.
 // A "source" is a scraper/add-on the corpus aggregates. Nodes PROBE sources and report a boolean verdict
 // (the Worker never fetches a source itself -> no SSRF, no load); the registry ranks sources by a transparent
 // health score derived from DISTINCT fresh non-barred node probes (mirrors the cache-confirmation trust model).
@@ -1121,7 +1205,7 @@ export const SOURCE_PROBE_TTL_MS = CACHE_TTL_MS; // a probe older than this no l
 export const SOURCE_HEALTH_MIN_NODES = 3; // below this many probing nodes the score is confidence-discounted
 export const MAX_SOURCES = 5000; // hard cap on registered sources (anti storage-exhaustion; new registrations refused past it, existing sources keep working)
 const SOURCE_ID_RE = /^[a-z0-9][a-z0-9_-]{1,63}$/; // stable lowercase slug
-const SOURCE_CATEGORY_RE = /^[\w .\-]{1,48}$/; // VortX-generic region/niche label (no rival names - enforced editorially)
+const SOURCE_CATEGORY_RE = /^[\w .\-]{1,48}$/; // VortX-generic region/niche label (generic labels only - enforced editorially)
 
 export interface CleanSource {
   id: string;
@@ -1198,7 +1282,7 @@ export function buildSourcesRegistry(rows: SourceHealthRow[], now: number): Regi
 }
 
 // ============================================================================
-// Torznab aggregation (content-moat #1; owner decision 2026-06-21 "Worker runs the scrapers").
+// Torznab aggregation: the operator-configured server-side scraper.
 // The Worker queries OPERATOR-ALLOWLISTED torznab (torrent) indexers server-side and folds the results into
 // the corpus. Safety by construction: the indexer apikey is a server secret and is NEVER emitted; the output
 // is infohash-ONLY (facts-never-tokens holds, exactly like a node contribution); parsing is DEFENSIVE +

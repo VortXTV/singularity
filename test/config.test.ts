@@ -116,7 +116,7 @@ console.log("buildConfiguredManifest");
   ok(typeof (m as { configurationURL?: string }).configurationURL === "string", "manifest has a configurationURL");
 }
 
-console.log("renderConfigurePage (VortX visual, no rival names)");
+console.log("renderConfigurePage (VortX visual, generic labels)");
 {
   const html = renderConfigurePage("https://singularity.vortx.tv");
   ok(html.startsWith("<!doctype html") || html.startsWith("<!DOCTYPE html"), "returns an HTML document");

@@ -9,6 +9,7 @@
 import {
   sanitizeContribution,
   sanitizeHttpFact,
+  isPublicHttpUrl,
   sanitizeNzbFact,
   normalizeInfoHash,
   reportHashKey,
@@ -79,7 +80,7 @@ console.log("sanitizeContribution");
     infoHash: HASH,
     quality: "2160p",
     size: 12_000_000_000,
-    source: "AIOStreams",
+    source: "SourceA",
     service: "realdebrid",
     cached: true,
     seeders: 42,
@@ -280,8 +281,8 @@ console.log("buildStreamResponse");
   const now = 2_000_000_000_000;
   const res = buildStreamResponse(
     [
-      { infoHash: "a".repeat(40), quality: "2160p", size: 2e10, source: "AIO", seeders: 5, cachedOn: ["torbox"], trusted: true, lastVerified: now - 1000 },
-      { infoHash: "b".repeat(40), quality: "1080p", size: 8e9, source: "Torrentio", seeders: 120, cachedOn: [], trusted: true, lastVerified: now - 1000 },
+      { infoHash: "a".repeat(40), quality: "2160p", size: 2e10, source: "SourceA", seeders: 5, cachedOn: ["torbox"], trusted: true, lastVerified: now - 1000 },
+      { infoHash: "b".repeat(40), quality: "1080p", size: 8e9, source: "SourceB", seeders: 120, cachedOn: [], trusted: true, lastVerified: now - 1000 },
       { infoHash: "c".repeat(40), quality: "720p", size: 2e9, source: "x", seeders: 9, cachedOn: [], trusted: false, lastVerified: now - 1000 }, // untrusted -> excluded
       { infoHash: "d".repeat(40), quality: "1080p", size: 8e9, source: "y", seeders: 50, cachedOn: [], trusted: true, lastVerified: now - (CACHE_TTL_MS + 1) }, // stale -> excluded
       { infoHash: "e".repeat(40), quality: "1080p", size: 8e9, source: "z", seeders: 0, cachedOn: [], trusted: true, lastVerified: now - 1000 }, // dead swarm + uncached -> excluded
@@ -316,9 +317,9 @@ console.log("sanitizeContribution field hygiene");
     ok(bad.service === null, "rejects non-slug service -> null");
     ok(bad.source === null, "rejects source with control chars/markup -> null");
   }
-  const norm = sanitizeContribution({ infoHash: HASH, service: "TorBox", quality: "2160p", source: "AIOStreams" });
+  const norm = sanitizeContribution({ infoHash: HASH, service: "TorBox", quality: "2160p", source: "SourceA" });
   ok(norm?.service === "torbox", "normalizes service to a lowercase slug");
-  ok(norm?.quality === "2160p" && norm?.source === "AIOStreams", "keeps clean quality + source");
+  ok(norm?.quality === "2160p" && norm?.source === "SourceA", "keeps clean quality + source");
 }
 
 // --- M5: bounded imdb id (a 12-char cap; real ids are tt + <=8 digits) ---
@@ -381,6 +382,75 @@ console.log("sanitizeHttpFact (public URLs only)");
   ok(sanitizeHttpFact({ url: "https://cdn.example.com/movie.mkv?quality=1080&lang=en" }) !== null, "still allows benign params");
 }
 
+// A contributed http URL is SERVED to every client and the CLIENT fetches it, so a private-range URL is a
+// fleet-side SSRF: one contributor could aim every player at their own LAN or at a cloud metadata endpoint.
+console.log("isPublicHttpUrl: private/loopback/link-local hosts are refused (fleet-side SSRF)");
+{
+  const blocked = [
+    "http://127.0.0.1/x.mkv",
+    "http://localhost/x.mkv",
+    "http://nas.local/x.mkv",
+    "http://svc.internal/x.mkv",
+    "http://router/x.mkv", // dotless intranet name
+    "http://10.0.0.5/x.mkv",
+    "http://192.168.1.1/x.mkv",
+    "http://172.16.0.1/x.mkv",
+    "http://172.31.255.254/x.mkv",
+    "http://100.64.0.1/x.mkv", // CGNAT
+    "http://169.254.169.254/latest/meta-data", // cloud metadata
+    "http://0.0.0.0/x.mkv",
+    "http://255.255.255.255/x.mkv",
+    "http://239.0.0.1/x.mkv", // multicast
+    // Obfuscated v4: WHATWG URL normalizes each of these to 127.0.0.1 before our check sees it.
+    "http://2130706433/x.mkv",
+    "http://0177.0.0.1/x.mkv",
+    "http://0x7f.0.0.1/x.mkv",
+    "http://127.1/x.mkv",
+    // v6 loopback / ULA / link-local, and v4-mapped forms (URL normalizes ::ffff:127.0.0.1 -> ::ffff:7f00:1).
+    "http://[::1]/x.mkv",
+    "http://[::]/x.mkv",
+    "http://[fc00::1]/x.mkv",
+    "http://[fd12:3456::1]/x.mkv",
+    "http://[fe80::1]/x.mkv",
+    "http://[::ffff:127.0.0.1]/x.mkv",
+    "http://[::ffff:169.254.169.254]/x.mkv",
+    "http://[::ffff:a9fe:a9fe]/x.mkv", // metadata IP, already in normalized hex form
+    // Deprecated IPv4-COMPATIBLE / -translated v6: URL normalizes "::127.0.0.1" -> "::7f00:1" and
+    // "::ffff:0:127.0.0.1" -> "::ffff:0:7f00:1", so neither matches the v4-MAPPED shape. All of ::/96
+    // is reserved, so the guard refuses the whole block rather than chase encodings.
+    "http://[::127.0.0.1]/x.mkv",
+    "http://[::192.168.1.1]/x.mkv",
+    "http://[::ffff:0:127.0.0.1]/x.mkv",
+    "http://[64:ff9b::7f00:1]/x.mkv", // NAT64-embedded loopback
+    "http://[2002:7f00:1::]/x.mkv", // 6to4-embedded loopback
+    "http://127.0.0.1./x.mkv", // trailing-dot FQDN form of a loopback literal
+    "http://LOCALHOST/x.mkv", // case
+  ];
+  for (const u of blocked) {
+    ok(isPublicHttpUrl(u) === false, `refuses private host: ${u}`);
+    ok(sanitizeHttpFact({ url: u }) === null, `ingest refuses private host: ${u}`);
+  }
+  // Public hosts must still pass: the guard must not break legitimate CDNs.
+  const allowed = [
+    "https://cdn.example.com/movie.mkv",
+    "http://8.8.8.8/x.mkv",
+    "https://1.1.1.1/x.mkv",
+    "https://[2606:4700:4700::1111]/x.mkv", // public v6
+    "https://[::ffff:8.8.8.8]/x.mkv", // v4-MAPPED but public: the ::/96 rule must not over-block this
+    "https://172.32.0.1/x.mkv", // just OUTSIDE 172.16/12
+    "https://172.15.255.255/x.mkv", // just BELOW 172.16/12
+    "https://100.63.255.255/x.mkv", // just BELOW the CGNAT block
+    "https://100.128.0.1/x.mkv", // just ABOVE the CGNAT block
+    "https://11.0.0.1/x.mkv", // adjacent to 10/8
+    "https://126.0.0.1/x.mkv", // adjacent to 127/8
+    "https://128.0.0.1/x.mkv", // adjacent to 127/8
+    "https://169.253.0.1/x.mkv", // adjacent to 169.254/16
+    "https://192.167.0.1/x.mkv", // adjacent to 192.168/16
+    "https://223.255.255.255/x.mkv", // just BELOW multicast 224/4
+  ];
+  for (const u of allowed) ok(isPublicHttpUrl(u) === true, `still allows public host: ${u}`);
+}
+
 // --- buildStreamResponse defense-in-depth: drop a non-public http url even if it reached the corpus ---
 console.log("buildStreamResponse drops a tokenized http url at read time");
 {
@@ -430,7 +500,7 @@ console.log("buildStreamResponse (mixed kinds)");
   ok(!!h && h.behaviorHints.vortx.kind === "http", "http stream carries vortx.kind=http");
 }
 
-// --- config-driven filter + sort pipeline (the AIOStreams-class runtime) ---
+// --- config-driven filter + sort pipeline (the configurable filter/sort runtime) ---
 console.log("buildStreamResponse: filters + sort");
 {
   const now = 5_000_000_000_000;
@@ -784,7 +854,7 @@ console.log("reConfirmationVindicates (false-reporter counter-signal)");
   ok(reConfirmationVindicates(0, 0) === false, "a brand-new claim with no reports never triggers the counter-signal");
 }
 
-// --- VortX Verified Sources: the health-scored source registry (content-moat #2) ---
+// --- VortX Verified Sources: the health-scored source registry ---
 console.log("sources registry (sanitize + health score + rank)");
 {
   // sanitizeSource: field whitelist
@@ -825,7 +895,7 @@ console.log("sources registry (sanitize + health score + rank)");
   ok(reg[0].health === 100 && reg[2].health === 0 && reg[2].status === "untested", "registry carries health + status");
 }
 
-// --- Torznab aggregation (content-moat #1, "Worker runs the scrapers"): parse + map + host allowlist ---
+// --- Torznab aggregation: parse + map + host allowlist ---
 console.log("torznab aggregation (parse + fact mapping + host allowlist)");
 {
   const xml = `<rss><channel>

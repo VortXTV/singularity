@@ -8,9 +8,8 @@ them cached, and which swarms are alive right now" - the union of every member's
 > **Status: dormant groundwork (ships 0.4.0+).** Per the federation spec, the public hive-mind lands
 > after VortX has in-app debrid + usenet (the app must natively resolve/scrape before it can contribute
 > facts). This Worker is built **two-planes-from-day-one** so it bolts on without re-architecting; the
-> app does not point at it yet. It is intentionally a **separate Worker** from `vortx-sync` (the blind E2E
-> sync relay at `api.vortx.tv`, in the [VortX repo](https://github.com/VortXTV/VortX) under `cloudflare/`) -
-> that plane holds ciphertext and locks CORS to the site; this plane holds only public source facts and
+> app does not point at it yet. Account and user-data services are intentionally a **separate deployment**
+> with their own storage and a locked-down origin policy; this plane holds only public source facts and
 > serves open-CORS add-on JSON. The two never mix.
 >
 > **Roadmap:** Singularity is growing from this corpus skeleton into a full **configurable super add-on**

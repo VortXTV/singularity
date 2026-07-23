@@ -49,5 +49,5 @@ of the repo).
 ## CI
 
 `.github/workflows/ci.yml` runs the unit tests on every push/PR. Deploy is **manual**
-(`workflow_dispatch`) and requires the `CLOUDFLARE_API_TOKEN` repo secret — there is no auto-deploy while
+(`workflow_dispatch`) and requires the `CLOUDFLARE_API_TOKEN` repo secret. There is no auto-deploy while
 the add-on is dormant.

@@ -1,9 +1,9 @@
 # Singularity: the VortX source engine (PUBLIC plane of the federation), served at singularity.vortx.tv.
 #
-# A SEPARATE Worker from vortx-sync (../wrangler.toml). vortx-sync is a blind E2E relay with
-# locked-origin CORS at api.vortx.tv; Singularity serves public Stremio add-on JSON with open CORS and
-# holds NO user data - only source facts (infohash index + debrid-cache booleans + live health). Keeping
-# them as two Workers + two D1 databases is the "two planes" separation from the federation spec.
+# Singularity serves public Stremio add-on JSON with open CORS and holds NO user data - only source facts
+# (infohash index + debrid-cache booleans + live health). Any account / user-data service is a SEPARATE
+# deployment with its own database and its own locked-down origin policy. That split is deliberate and load
+# bearing: never add a user-data table or a credential-bearing endpoint to this Worker.
 #
 # STATUS: dormant groundwork (0.4.0+). Not deployed and not pointed at by the app yet. Deploy steps:
 #   1. npx wrangler d1 create vortx-singularity        # paste database_id below

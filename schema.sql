@@ -4,9 +4,9 @@
 -- index, a debrid-cache boolean map, live swarm health, and node trust/penalty bookkeeping. It is the
 -- same public torrent metadata that open indexers already publish. The user's debrid TOKEN and any RESOLVED
 -- playback link are NEVER stored here (see src/corpus.ts sanitizeContribution + the VortX LEGAL/DMCA
--- posture at https://github.com/VortXTV/VortX/blob/main/docs/LEGAL.md). This DB
--- is entirely separate from the private sync relay (vortx-sync / api.vortx.tv), which holds E2E
--- ciphertext and no source facts. The two planes never mix.
+-- posture at https://github.com/VortXTV/VortX/blob/main/docs/LEGAL.md). This DB holds source facts only and
+-- is entirely separate from any account / user-data storage, which lives in its own deployment. The two
+-- planes never mix.
 --
 -- SAFETY (do not remove). This file is IDEMPOTENT and NON-DESTRUCTIVE: safe to run against the live
 -- database at any time, and it NEVER drops a table. Additive changes go in migrations/ as numbered
@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS peers (
   last_pull INTEGER NOT NULL DEFAULT 0
 );
 
--- VortX Verified Sources: the health-scored source registry (content-moat #2). A "source" is a scraper/add-on
+-- VortX Verified Sources: the health-scored source registry. A "source" is a scraper/add-on
 -- the corpus aggregates; `url` is METADATA ONLY (displayed, NEVER fetched server-side - no SSRF). Health comes
 -- from nodes PROBING sources and reporting a boolean verdict (the Worker never probes), ranked by a transparent
 -- score over DISTINCT fresh non-barred node probes (mirrors cache_confirmations). GET /sources reads this.

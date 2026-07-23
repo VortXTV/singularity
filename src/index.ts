@@ -2,10 +2,10 @@
  * Singularity: the VortX source engine (Cloudflare Worker + D1), served at singularity.vortx.tv.
  *
  * This is the PUBLIC plane of the federation - a crowd-verified corpus of SOURCE facts (torrent index
- * + debrid-cache map + live swarm health), exposed as a single Stremio add-on. It is deliberately a
- * SEPARATE Worker from the private sync relay (api.vortx.tv / vortx-sync): that one is a blind store of
- * E2E ciphertext with locked-origin CORS; this one serves public add-on JSON with open CORS and holds
- * NO user data at all. The two planes never mix.
+ * + debrid-cache map + live swarm health), exposed as a single Stremio add-on. Account and user-data
+ * services are SEPARATE deployments with their own storage and their own locked-down origin policy; this
+ * Worker serves public add-on JSON with open CORS and holds NO user data at all. The two planes never mix,
+ * so no user-data table and no credential-bearing endpoint belongs here.
  *
  * STATUS: dormant groundwork. The full hive-mind ships 0.4.0+ AND after in-app debrid/usenet (see
  * docs/LEGAL.md + the federation spec). The app does not point at this yet. It is built two-planes-from-
@@ -78,7 +78,7 @@ export interface Env {
   // vortx-source/1 manifest so the engine treats Singularity as a SIGNED native source. UNSET = manifest is
   // served unsigned (the current default). The key is a Worker secret; the public part (`x`) becomes the keyId.
   MANIFEST_SIGNING_KEY?: string;
-  // Content-moat #1 "VortX Verified Sources" (owner decision "Worker runs the scrapers"). A SECRET JSON array
+  // VortX Verified Sources: operator-run torznab aggregation. A SECRET JSON array
   // of operator torznab indexers: [{"name":"...","url":"https://host/api","apikey":"..."}]. The host of each
   // https url forms the outbound-fetch ALLOWLIST (bounds SSRF); the apikey is server-side only and never
   // emitted (output is infohash-only). UNSET = scraping is inert. Endpoints + keys live HERE, never in the repo.
@@ -128,6 +128,25 @@ const json = (b: unknown, status = 200, cache = false) =>
       ...cors(),
     },
   });
+/**
+ * Per-IP throttle for an UNAUTHENTICATED WRITE path. Fails CLOSED: if the rate-limiter binding is missing,
+ * the request is refused rather than let through unthrottled.
+ *
+ * Why closed: RL is an experimental [[unsafe.bindings]] (see wrangler.toml) that wrangler itself warns "may
+ * change or break at any time". With the old `if (env.RL && ...)` shape, a binding that silently failed to
+ * provision turned every public write path into an unthrottled one - the spam control would be gone and
+ * nothing would say so. An open write path on a public corpus is worse than a refused one, so absence of the
+ * limiter is treated as "cannot serve writes". 503 (not 429) so the cause is diagnosable from the response.
+ *
+ * Returns a Response to return immediately, or null to proceed. READ paths keep the fail-OPEN shape on
+ * purpose: they are public cacheable add-on responses, and refusing them on a binding blip would take the
+ * add-on down for a throttle that only exists to blunt cache-busting.
+ */
+async function throttleWrite(env: Env, key: string, ip: string): Promise<Response | null> {
+  if (!env.RL) return json({ error: "unavailable", detail: "rate limiter unavailable; writes are refused" }, 503);
+  return (await env.RL.limit({ key: `${key}:${ip}` })).success ? null : json({ error: "rate_limited" }, 429);
+}
+
 const html = (body: string, status = 200) =>
   new Response(body, {
     status,
@@ -446,7 +465,8 @@ async function recordTorrentConfirmation(env: Env, infoHash: string, metaId: str
 }
 
 async function handleContribute(req: Request, env: Env, ip: string): Promise<Response> {
-  if (env.RL && !(await env.RL.limit({ key: `contribute:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const limited = await throttleWrite(env, "contribute", ip);
+  if (limited) return limited;
   const body = await readJSON(req);
   if (!body) return json({ error: "bad_request" }, 400);
   const { pubKey, ts, sig } = body as { pubKey?: string; ts?: number; sig?: string };
@@ -561,7 +581,8 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
 // system (false claim penalizes the contributor; a false report penalizes the reporter). The skeleton
 // records the report + a placeholder penalty hook; full adjudication is later federation work.
 async function handleReport(req: Request, env: Env, ip: string): Promise<Response> {
-  if (env.RL && !(await env.RL.limit({ key: `report:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const limited = await throttleWrite(env, "report", ip);
+  if (limited) return limited;
   const body = await readJSON(req);
   if (!body) return json({ error: "bad_request" }, 400);
   const now = Date.now();
@@ -706,7 +727,7 @@ async function handleCatalog(env: Env, type: string, idRaw: string): Promise<Res
 }
 
 // Federation delta-sync: a self-hosted node pulls corpus facts newer than its cursor to bootstrap + stay
-// current (the pull half of the CometNet-style relay model; /hive/contribute is the push half). Facts only
+// current (the pull half of the relay model; /hive/contribute is the push half). Facts only
 // (assembleSyncDelta re-applies the whitelist). Per-IP throttled; cursor-paginated via ?since=&limit=.
 async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
   if (env.RL && !(await env.RL.limit({ key: `sync:${ip}` })).success) return json({ error: "rate_limited" }, 429);
@@ -775,6 +796,43 @@ async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promi
   return { torrents: ing.torrents.length, nzbs: ing.nzbs.length, health: ing.health.length, cacheFacts: cacheStored };
 }
 
+/**
+ * Read a response body as text, giving up as soon as it exceeds `cap` bytes.
+ *
+ * Why this exists: `await res.text()` buffers the WHOLE body first, so a post-hoc `body.length > cap` check
+ * has already paid the memory cost it was meant to prevent - a hostile peer or indexer can OOM the isolate
+ * with a gzip bomb (the runtime decompresses transparently) no matter what the check says afterwards. This
+ * streams and aborts at the cap, so the bound is real. Returns null if the body is over the cap or unreadable.
+ *
+ * `cap` counts DECOMPRESSED bytes, which is the number that matters: content-length describes the compressed
+ * body and so is not a usable bound on its own (it is still checked first as a cheap early-out).
+ */
+async function readCappedText(res: Response, cap: number): Promise<string | null> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > cap) return null; // cheap early-out; not sufficient alone
+  if (!res.body) return null;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let out = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) return null; // stop pulling: the bomb never gets fully buffered
+      out += decoder.decode(value, { stream: true });
+    }
+    return out + decoder.decode();
+  } catch {
+    return null;
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+const PEER_BODY_CAP = 8 * 1024 * 1024; // max DECOMPRESSED bytes accepted from one peer's sync delta
+
 // Pull deltas from every ALLOWLISTED peer (env.PEERS, operator-set https URLs - never user input, so no
 // SSRF) and ingest INDEX + health facts. Per-peer cursor in `peers`. A peer being down or returning garbage
 // must never break the sweep, so each peer is isolated in try/catch.
@@ -798,18 +856,21 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
     try {
       const row = await env.DB.prepare("SELECT cursor FROM peers WHERE url = ?").bind(peer).first<{ cursor: number }>();
       const since = row?.cursor ?? 0;
-      // Bound a slow/hostile peer: abort after 8s, and cap the buffered body (a gzip-bomb could OOM the isolate).
+      // Bound a slow/hostile peer: abort after 8s, and cap the body AS IT STREAMS (a gzip bomb could OOM the
+      // isolate). redirect:"manual" is load-bearing: the operator PEERS allowlist is the SSRF bound, and
+      // following a redirect would let an allowlisted-but-hostile peer 302 this fetch to an arbitrary host and
+      // walk straight out of that bound. A peer that redirects is treated as down.
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), 8000);
-      let raw: string;
+      let raw: string | null;
       try {
-        const res = await fetch(`${peer}/hive/sync?since=${since}&limit=500`, { headers: { accept: "application/json" }, signal: ctl.signal });
-        if (!res.ok) continue;
-        raw = await res.text();
+        const res = await fetch(`${peer}/hive/sync?since=${since}&limit=500`, { headers: { accept: "application/json" }, signal: ctl.signal, redirect: "manual" });
+        if (!res.ok) continue; // includes 3xx: a redirecting peer is not followed
+        raw = await readCappedText(res, PEER_BODY_CAP);
       } finally {
         clearTimeout(timer);
       }
-      if (raw.length > 8 * 1024 * 1024) continue; // 8 MB cap
+      if (raw === null) continue; // over the cap or unreadable
       let delta: unknown;
       try {
         delta = JSON.parse(raw);
@@ -850,7 +911,7 @@ async function handlePull(req: Request, env: Env, ip: string): Promise<Response>
 }
 
 // ============================================================================
-// Content-moat #1: torznab aggregation ("VortX Verified Sources"; owner "Worker runs the scrapers").
+// Torznab aggregation ("VortX Verified Sources"): the operator-configured server-side scraper.
 // The Worker queries OPERATOR-ALLOWLISTED torznab indexers server-side and folds results into the corpus.
 // Safety: indexer endpoints+keys are a server SECRET (env.SCRAPER_INDEXERS, never the repo); outbound fetch
 // only to those hosts (bounds SSRF), gossip-grade hardening (https, no userinfo, 8s abort, body cap); the
@@ -893,8 +954,8 @@ function parseIndexers(env: Env): IndexerCfg[] {
   return out;
 }
 
-/** Hardened outbound torznab search fetch (allowlisted host, 8s abort, body cap). apikey stays in the URL,
- * server-side only, never logged or emitted. Returns the body, or null on any failure. */
+/** Hardened outbound torznab search fetch (allowlisted host, 8s abort, streamed body cap, no redirects).
+ * apikey stays in the URL, server-side only, never logged or emitted. Returns the body, or null on any failure. */
 async function fetchTorznab(idx: IndexerCfg, query: string): Promise<string | null> {
   let target: string;
   try {
@@ -911,10 +972,12 @@ async function fetchTorznab(idx: IndexerCfg, query: string): Promise<string | nu
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
-    const res = await fetch(target, { headers: { accept: "application/rss+xml, application/xml, text/xml, application/json" }, signal: ctl.signal });
-    if (!res.ok) return null;
-    const body = await res.text();
-    return body.length > SCRAPE_BODY_CAP ? null : body;
+    // redirect:"manual" is load-bearing: isAllowedIndexerHost is the SSRF bound, but it only checks the URL we
+    // ASK for. Following a redirect would let an indexer 302 us to any host and bypass the allowlist entirely,
+    // AND would leak the apikey in the forwarded query string to that host. An indexer that redirects fails.
+    const res = await fetch(target, { headers: { accept: "application/rss+xml, application/xml, text/xml, application/json" }, signal: ctl.signal, redirect: "manual" });
+    if (!res.ok) return null; // includes 3xx: not followed
+    return await readCappedText(res, SCRAPE_BODY_CAP);
   } catch {
     return null;
   } finally {
@@ -1042,7 +1105,8 @@ async function handleLeaderboard(env: Env, url: URL): Promise<Response> {
 // A node self-reports its software version (signed, same identity proof as contribute). Lightweight: it
 // just refreshes version + last_seen so the dashboard "Nodes" section can show status.
 async function handleTelemetry(req: Request, env: Env, ip: string): Promise<Response> {
-  if (env.RL && !(await env.RL.limit({ key: `telemetry:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const limited = await throttleWrite(env, "telemetry", ip);
+  if (limited) return limited;
   const body = await readJSON(req);
   if (!body) return json({ error: "bad_request" }, 400);
   const { pubKey, ts, sig, version } = body as { pubKey?: string; ts?: number; sig?: string; version?: string };
@@ -1056,7 +1120,7 @@ async function handleTelemetry(req: Request, env: Env, ip: string): Promise<Resp
   return json({ ok: true });
 }
 
-// VortX Verified Sources: the public health-scored source registry (content-moat #2). Aggregate read only -
+// VortX Verified Sources: the public health-scored source registry. Aggregate read only -
 // source metadata + a transparent health score from DISTINCT fresh non-barred node probes. No node ids, no
 // secrets; `url` is metadata the Worker never fetches. Edge-cacheable; per-IP capped (one GROUP-BY join).
 async function handleSourcesRegistry(env: Env, ip: string): Promise<Response> {
@@ -1096,7 +1160,8 @@ async function handleSourcesRegistry(env: Env, ip: string): Promise<Response> {
 // the Worker never probes a source itself -> no SSRF). An optional `source` object registers the source on
 // first sight (first registrant's metadata wins). One latest verdict per (source, node), LWW by ts.
 async function handleSourceProbe(req: Request, env: Env, ip: string): Promise<Response> {
-  if (env.RL && !(await env.RL.limit({ key: `srcprobe:${ip}` })).success) return json({ error: "rate_limited" }, 429);
+  const limited = await throttleWrite(env, "srcprobe", ip);
+  if (limited) return limited;
   const body = await readJSON(req);
   if (!body) return json({ error: "bad_request" }, 400);
   const now = Date.now();
@@ -1180,7 +1245,7 @@ export default {
     const now = Date.now();
     const summary = await pullFromPeers(env, now);
     console.log("[gossip] scheduled pull", JSON.stringify(summary));
-    // Content-moat #1: scrape the top trending movies from operator-allowlisted indexers (inert without config).
+    // Scrape the top trending movies from operator-allowlisted indexers (inert without config).
     try {
       const scrape = await scheduledScrape(env, now);
       if (scrape.titles > 0) console.log("[scrape] scheduled", JSON.stringify(scrape));
