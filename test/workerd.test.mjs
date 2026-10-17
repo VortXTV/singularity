@@ -8,8 +8,9 @@ const { Miniflare } = await import(process.env.MINIFLARE_MODULE ?? '/opt/homebre
 const ROOT = process.env.SINGULARITY_SOURCE_ROOT ?? fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '');
 const overlay = process.env.SINGULARITY_TEST_OVERLAY ? (await import(pathToFileURL(process.env.SINGULARITY_TEST_OVERLAY))).candidates() : new Map();
 const source = (name) => overlay.get(name) ?? readFileSync(`${ROOT}/${name}`, 'utf8');
-const files = ['index', 'corpus', 'config', 'configure', 'sync'].map((name) => ({ type: 'ESModule', path: `${ROOT}/src/${name}.ts`, contents: stripTypeScriptTypes(source(`src/${name}.ts`), { mode: 'strip' }) }));
+const files = ['index', 'corpus', 'config', 'configure', 'sync', 'body'].map((name) => ({ type: 'ESModule', path: `${ROOT}/src/${name}.ts`, contents: stripTypeScriptTypes(source(`src/${name}.ts`), { mode: 'strip' }) }));
 let peerReply = null;
+let peerBody = null; // Finite route conformance only; this callback is not a stream/timing oracle.
 const mf = new Miniflare({
   cf: false, // Never fetch Miniflare's external Request.cf metadata during a local-only gate.
   compatibilityDate: '2026-06-01', modulesRoot: ROOT,
@@ -22,6 +23,7 @@ const mf = new Miniflare({
   d1Databases: ['DB'], d1Persist: false,
   bindings: { PEERS: 'https://peer.test', PULL_SECRET: 'local-peer-fixture' },
   outboundService: (request) => {
+    if (peerBody !== null && new URL(request.url).origin === 'https://peer.test') return new Response(peerBody, { headers: { 'content-type': 'application/json' } });
     if (peerReply && new URL(request.url).origin === 'https://peer.test') return Response.json(peerReply);
     return new Response('live network forbidden', { status: 502 });
   },
@@ -146,5 +148,80 @@ try {
     eq((await db.prepare('SELECT cursor FROM peer_sync_cursors').first()).cursor, saved.cursor, 'workerd advancing empty/missing stream is not acknowledged');
     eq((await db.prepare('SELECT * FROM peers').all()).results, previousPeers, 'workerd advancing empty/missing stream preserves legacy cursor');
   }
-  console.log(JSON.stringify({ gate: 'singularity-current-candidate-workerd-d1', assertions, passed: true, indexSHA256: createHash('sha256').update(source('src/index.ts')).digest('hex'), migrationSHA256: createHash('sha256').update(source('migrations/008_lossless_sync_and_receipts.sql')).digest('hex') }));
+
+  // Real route + disposable D1 conformance. dispatchFetch may buffer body bytes; these are
+  // not chunk-boundary, streaming, abort, cancellation or wall-clock deadline assertions.
+  const stateTables = ['nodes', 'torrents', 'torrent_confirmations', 'cache_facts', 'cache_confirmations', 'signed_cache_facts', 'health', 'reports', 'http_streams', 'http_confirmations', 'nzbs', 'peers', 'peer_sync_cursors', 'report_history', 'contribution_receipts', 'sync_publications', 'sqlite_sequence'];
+  const bodyState = async () => Object.fromEntries(await Promise.all(stateTables.map(async (table) => [table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results])));
+  const postBytes = async (bytes) => {
+    const response = await mf.dispatchFetch('https://singularity.test/hive/contribute', { method: 'POST', headers: { 'content-type': 'application/json' }, body: bytes });
+    return { status: response.status, json: await response.json() };
+  };
+  const decodedCap = 1024 * 1024;
+  const bom = Uint8Array.of(0xef, 0xbb, 0xbf);
+  let requestCases = 0;
+  for (const symbol of ['a', '€', '😀']) {
+    // Sequential finite bodies limit retained payload copies in the parent Node process.
+    const bodyNode = await identity();
+    const bodyFacts = [{ infoHash: hash(4000 + requestCases), metaId: 'tt4000', seeders: 7, proof: '漢😀é\ud800' }];
+    const bodyPacket = await signed(bodyNode, JSON.stringify(bodyFacts), { facts: bodyFacts, padding: '' });
+    const missingChars = decodedCap - JSON.stringify(bodyPacket).length;
+    bodyPacket.padding = symbol.repeat(Math.floor(missingChars / symbol.length)) + 'a'.repeat(missingChars % symbol.length);
+    let text = JSON.stringify(bodyPacket);
+    eq(text.length, decodedCap, 'workerd request fixture measures decoded UTF-16 cap');
+    let bytes = new TextEncoder().encode(text);
+    const wire = new Uint8Array(bom.byteLength + bytes.byteLength);
+    wire.set(bom); wire.set(bytes, bom.byteLength);
+    if (symbol !== 'a') eq(bytes.byteLength > decodedCap, true, 'multibyte request fixture exceeds 1MiB wire bytes');
+    const acceptedBody = await postBytes(wire);
+    eq(acceptedBody, { status: 200, json: { accepted: 1, stored: true } }, 'workerd BOM + signed Unicode at exact decoded cap');
+    eq(await db.prepare('SELECT meta_id, seeders FROM torrents JOIN health USING (info_hash) WHERE info_hash = ?').bind(bodyFacts[0].infoHash).first(), { meta_id: 'tt4000', seeders: 7 }, 'exact-cap signed fact reaches real D1');
+    eq((await db.prepare('SELECT contributions FROM nodes WHERE id = ?').bind(bodyNode.id).first()).contributions, 1, 'exact-cap signed request receives one D1 receipt');
+    text = ''; bytes = null;
+    // Use another otherwise-valid signed fact: acceptance would create a new node and fact.
+    const overNode = await identity();
+    const overFacts = [{ infoHash: hash(4100 + requestCases), metaId: 'tt4100', seeders: 8, proof: '漢😀é\ud800' }];
+    const overPacket = await signed(overNode, JSON.stringify(overFacts), { facts: overFacts, padding: '' });
+    const overMissing = decodedCap + 1 - JSON.stringify(overPacket).length;
+    overPacket.padding = symbol.repeat(Math.floor(overMissing / symbol.length)) + 'a'.repeat(overMissing % symbol.length);
+    const overText = JSON.stringify(overPacket);
+    eq(overText.length, decodedCap + 1, 'workerd one-over request is valid JSON with one extra UTF-16 unit');
+    const beforeBodyReject = await bodyState();
+    eq(await postBytes(new TextEncoder().encode(overText)), { status: 400, json: { error: 'bad_request' } }, 'workerd rejects decoded cap plus one');
+    eq(await bodyState(), beforeBodyReject, 'over-cap request leaves nodes, facts, receipts, journals and cursors exact');
+    requestCases++;
+  }
+
+  // A valid peer page padded only by an ignored root field reaches the real byte cap.
+  // No Content-Length is supplied by the fixture; transport framing remains Miniflare-owned.
+  const peerCap = 8 * 1024 * 1024;
+  const peerPage = (id, previous) => {
+    const position = { ...previous, torrents: [previous.torrents[0] + 1], health: [previous.health[0] + 1] };
+    return { cursorVersion: 2, nextCursor: '2.' + Buffer.from(JSON.stringify(position)).toString('base64url'), cursor: 1000 + id,
+      torrents: [{ infoHash: hash(id), metaId: 'tt5000', addedAt: 25 }], health: [{ infoHash: hash(id), seeders: 31, lastSeen: 26 }], cache: [], http: [], nzb: [], padding: '' };
+  };
+  const sizedPeerBody = (packet, size) => {
+    const unpadded = JSON.stringify(packet);
+    return unpadded.slice(0, -2) + ' '.repeat(size - Buffer.byteLength(unpadded)) + unpadded.slice(-2);
+  };
+  let exactPeer = peerPage(5000, storedPosition);
+  peerBody = sizedPeerBody(exactPeer, peerCap);
+  eq(Buffer.byteLength(peerBody), peerCap, 'peer fixture is exactly 8MiB delivered UTF-8 bytes');
+  eq(JSON.parse(peerBody).nextCursor, exactPeer.nextCursor, 'exact-cap peer body is valid JSON');
+  eq(await post('/hive/pull', {}, { 'x-pull-secret': 'local-peer-fixture' }), { status: 200, json: { pulled: true, peers: 1, torrents: 1, nzbs: 0, health: 1, cacheFacts: 0 } }, 'workerd accepts finite peer body at exact 8MiB');
+  peerBody = null;
+  eq((await db.prepare('SELECT cursor FROM peer_sync_cursors WHERE url = ?').bind('https://peer.test').first()).cursor, exactPeer.nextCursor, 'exact-cap peer advances the opaque cursor');
+  eq((await db.prepare('SELECT cursor FROM peers WHERE url = ?').bind('https://peer.test').first()).cursor, exactPeer.cursor, 'exact-cap peer advances the scalar cursor');
+  eq(await db.prepare('SELECT meta_id, added_at FROM torrents WHERE info_hash = ?').bind(hash(5000)).first(), { meta_id: 'tt5000', added_at: 25 }, 'exact-cap peer stores its torrent');
+  eq(await db.prepare('SELECT seeders, last_seen FROM health WHERE info_hash = ?').bind(hash(5000)).first(), { seeders: 31, last_seen: 26 }, 'exact-cap peer stores its health');
+  const afterExactPeer = JSON.parse(Buffer.from(exactPeer.nextCursor.slice(2), 'base64url').toString());
+  exactPeer = null;
+  peerBody = sizedPeerBody(peerPage(5001, afterExactPeer), peerCap + 1);
+  eq(Buffer.byteLength(peerBody), peerCap + 1, 'peer fixture is 8MiB plus one delivered UTF-8 byte');
+  eq(JSON.parse(peerBody).torrents[0].infoHash, hash(5001), 'one-over peer body is otherwise valid JSON');
+  const beforePeerReject = await bodyState();
+  eq(await post('/hive/pull', {}, { 'x-pull-secret': 'local-peer-fixture' }), { status: 200, json: { pulled: true, peers: 0, torrents: 0, nzbs: 0, health: 0, cacheFacts: 0 } }, 'workerd ignores finite peer body over 8MiB');
+  peerBody = null;
+  eq(await bodyState(), beforePeerReject, 'one-over peer leaves both cursors, facts, trust, receipts and publication journal exact');
+  console.log(JSON.stringify({ gate: 'singularity-current-candidate-workerd-d1', assertions, passed: true, requestBodyConformanceCases: requestCases, finitePeerBodySizes: [peerCap, peerCap + 1], indexSHA256: createHash('sha256').update(source('src/index.ts')).digest('hex'), bodySHA256: createHash('sha256').update(source('src/body.ts')).digest('hex'), workerdSHA256: createHash('sha256').update(source('test/workerd.test.mjs')).digest('hex'), migrationSHA256: createHash('sha256').update(source('migrations/008_lossless_sync_and_receipts.sql')).digest('hex') }));
 } finally { await mf.dispose(); }

@@ -191,6 +191,9 @@ deferral for temporarily future observations and the saved current-source regres
 The [peer metadata compatibility note](docs/peer-metadata.md) covers bounded decoding of the
 existing CSV/JSON TEXT wire fields before unchanged strict contribution sanitizers.
 
+The separate [body boundary note](docs/body-boundaries.md) records decoded-character compatibility,
+the deliberate body deadline and best-effort cancellation ownership; runtime proof remains separate.
+
 This remains source-only dormant groundwork. No database creation, migration, secret, cron, route or deployment is activated by these changes.
 
 GET /hive/sync?cursor=0&limit=400 returns cursorVersion:2, nextCursor and hasMore alongside the existing fact arrays/numeric cursor. Carry nextCursor unchanged in the next request's cursor parameter. Each of the five streams advances by its independent local publication sequence in the append-only sync_publications journal. Insert/update triggers retain whitelisted immutable snapshots; original addedAt/lastSeen remain in payloads. A late fact with an older source time, or a same-time key sorting before a previous page, still receives a new publication sequence. Migration008 seeds every legacy current row once and preserves publication history. There is no automatic journal deletion; retention/compaction needs a separately reviewed reader/bootstrap policy before future activation.

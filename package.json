@@ -10,7 +10,7 @@
   },
   "homepage": "https://singularity.vortx.tv",
   "scripts": {
-    "test": "node --experimental-strip-types test/singularity.test.ts && node --experimental-strip-types test/config.test.ts && node --experimental-strip-types test/database.test.mjs && node --experimental-strip-types --test test/peer-ack.test.mjs && node --experimental-strip-types --test test/peer-metadata.test.mjs",
+    "test": "node --experimental-strip-types test/singularity.test.ts && node --experimental-strip-types test/config.test.ts && node --experimental-strip-types test/database.test.mjs && node --experimental-strip-types --test test/peer-ack.test.mjs && node --experimental-strip-types --test test/peer-metadata.test.mjs && node --experimental-strip-types --test test/body-boundary.test.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "e2e": "node e2e-test.mjs",

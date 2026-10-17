@@ -17,6 +17,7 @@
  * construction. We host and index NO content.
  */
 
+import { readRequestJSON, readCappedText } from "./body.ts";
 import {
   sanitizeContribution,
   sanitizeHttpFact,
@@ -152,21 +153,8 @@ const html = (body: string, status = 200) =>
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=600", ...cors() },
   });
 
-async function readJSON(req: Request, maxBytes = 1024 * 1024): Promise<Record<string, unknown> | null> {
-  // Enforce the cap on the ACTUAL body, not a possibly-absent or lying Content-Length header.
-  let text: string;
-  try {
-    text = await req.text();
-  } catch {
-    return null;
-  }
-  if (text.length > maxBytes) return null;
-  try {
-    const b = JSON.parse(text);
-    return b && typeof b === "object" ? (b as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
+async function readJSON(req: Request, maxChars = 1024 * 1024): Promise<Record<string, unknown> | null> {
+  return readRequestJSON(req, maxChars);
 }
 
 // nodeId = the engine's short id, base64url(SHA-256(pubkey)[..16]) (crates/hive/src/identity.rs), so the
@@ -786,41 +774,6 @@ async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promi
   return { torrents: ing.torrents.length, nzbs: ing.nzbs.length, health: ing.health.length, cacheFacts: cacheStored };
 }
 
-/**
- * Read a response body as text, giving up as soon as it exceeds `cap` bytes.
- *
- * Why this exists: `await res.text()` buffers the WHOLE body first, so a post-hoc `body.length > cap` check
- * has already paid the memory cost it was meant to prevent - a hostile peer or indexer can OOM the isolate
- * with a gzip bomb (the runtime decompresses transparently) no matter what the check says afterwards. This
- * streams and aborts at the cap, so the bound is real. Returns null if the body is over the cap or unreadable.
- *
- * `cap` counts DECOMPRESSED bytes, which is the number that matters: content-length describes the compressed
- * body and so is not a usable bound on its own (it is still checked first as a cheap early-out).
- */
-async function readCappedText(res: Response, cap: number): Promise<string | null> {
-  const declared = Number(res.headers.get("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > cap) return null; // cheap early-out; not sufficient alone
-  if (!res.body) return null;
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let total = 0;
-  let out = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > cap) return null; // stop pulling: the bomb never gets fully buffered
-      out += decoder.decode(value, { stream: true });
-    }
-    return out + decoder.decode();
-  } catch {
-    return null;
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-}
-
 const PEER_BODY_CAP = 8 * 1024 * 1024; // max DECOMPRESSED bytes accepted from one peer's sync delta
 
 // Pull deltas from every ALLOWLISTED peer (env.PEERS, operator-set https URLs - never user input, so no
@@ -855,12 +808,13 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
       // following a redirect would let an allowlisted-but-hostile peer 302 this fetch to an arbitrary host and
       // walk straight out of that bound. A peer that redirects is treated as down.
       const ctl = new AbortController();
+      const deadlineAt = performance.now() + 8000;
       const timer = setTimeout(() => ctl.abort(), 8000);
       let raw: string | null;
       try {
         const res = await fetch(`${peer}/hive/sync?since=${since}&cursor=${encodeURIComponent(requestCursor)}&limit=400&exclude=http`, { headers: { accept: "application/json" }, signal: ctl.signal, redirect: "manual" });
         if (!res.ok) continue; // includes 3xx: a redirecting peer is not followed
-        raw = await readCappedText(res, PEER_BODY_CAP);
+        raw = await readCappedText(res, PEER_BODY_CAP, { signal: ctl.signal, deadlineAt });
       } finally {
         clearTimeout(timer);
       }
@@ -981,6 +935,7 @@ async function fetchTorznab(idx: IndexerCfg, query: string): Promise<string | nu
   }
   if (!isAllowedIndexerHost(target, [idx.host])) return null; // defense-in-depth (host is from idx.url, re-checked)
   const ctl = new AbortController();
+  const deadlineAt = performance.now() + 8000;
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
     // redirect:"manual" is load-bearing: isAllowedIndexerHost is the SSRF bound, but it only checks the URL we
@@ -988,7 +943,7 @@ async function fetchTorznab(idx: IndexerCfg, query: string): Promise<string | nu
     // AND would leak the apikey in the forwarded query string to that host. An indexer that redirects fails.
     const res = await fetch(target, { headers: { accept: "application/rss+xml, application/xml, text/xml, application/json" }, signal: ctl.signal, redirect: "manual" });
     if (!res.ok) return null; // includes 3xx: not followed
-    return await readCappedText(res, SCRAPE_BODY_CAP);
+    return await readCappedText(res, SCRAPE_BODY_CAP, { signal: ctl.signal, deadlineAt });
   } catch {
     return null;
   } finally {
