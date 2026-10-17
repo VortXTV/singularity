@@ -70,9 +70,13 @@ an expired origin also permits no body read. A distant future origin cannot leng
 Receiving headers or a delayed abort callback does not reset the observed origin budget.
 Request admission still accepts only its own req.signal and timeout option, not an origin override.
 
-These cleanup guarantees apply when the body helper owns the reader. The existing callers skip
-non-2xx responses before acquiring that reader and clear their fetch timer in finally; explicit
-non-2xx response-body cancellation remains a separate follow-up, not a closed transport gate.
+The reader cleanup guarantees below apply when the body helper owns the reader. The separate
+non-OK cleanup follow-up requests response-body cancellation before the existing peer
+and Torznab rejection exits, without acquiring a reader or consuming failure content. Its private
+helper handles synchronous throws, rejecting or pending cancellation and null bodies without
+awaiting transport settlement. Its actual-route Node22 fixture passes all56 cases (57 tests
+including the parent); see
+[Non-OK outbound response cleanup](non-ok-response-cleanup.md). This is not a closed transport gate.
 
 One reader, one overall stop race, one timeout and one abort listener belong to one invocation.
 Timers/listeners are removed, the consume task is marked stopped and the owned reader lock is
@@ -128,6 +132,15 @@ The forwarding correction passed the following supervised, serial actual-source 
 | Current-source peer ACK and metadata |11/11 and2/2 tests pass |
 | Finite workerd route + disposable D1 |113 assertions pass, including3 exact/one-over decoded request cases and exact8MiB/8MiB+1 peer pages |
 
+A later local macOS runtime check of committed source c06315fcb9928cdd9c1cacee1dc06bfd1d32ef87
+used Node22.23.2: the actual body suite passed13/13 groups, and the Node22-hosted installed
+Miniflare/workerd finite route/D1 suite passed113 assertions. Both commands completed normally
+with exit0; retained run IDs are singularity-source-body.x08Svd and singularity-source-workerd.xeIeNh.
+The Worker still ran in pinned native workerd. These are two bounded local runtime-version checks,
+not a whole npm test/Linux CI result or a Node22 rerun of the fresh367-case Worker oracle.
+Those two checks predate non-OK cleanup. Its subsequent actual-source checks and limits are
+recorded separately in the linked non-OK note; older results are not borrowed for that change.
+
 The fresh Worker gate first failed with13 native-policy mismatches using the first decoder candidate.
 Its tests, old fixture and captured execution inputs were unchanged for GREEN except src/body.ts.
 The corrected run passes2,111 assertions overall. This is attributable local compatibility evidence;
@@ -147,5 +160,6 @@ write and peer routes, a fetch-spent/continuously slow peer with no cursor mutat
 actual route-level cap/abort under its unchanged allowlist/redirect policy. The fresh in-worker chunk
 oracle does not establish the transport's chunk cuts; Node helper controls do not establish deployed
 Worker timing. Native heap/metadata/RSS, synchronous CPU preemption, complete semantic TypeScript,
-Node22/portable tooling and production activation remain separate. No real indexer credentials,
+the complete package test chain/Linux CI, other-machine portability and production activation
+remain separate; the two local Node22 checks above cover only their named stages. No real indexer credentials,
 account writes, migration replay or deployment is authorized by these source/test results.

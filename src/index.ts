@@ -774,6 +774,11 @@ async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promi
   return { torrents: ing.torrents.length, nzbs: ing.nzbs.length, health: ing.health.length, cacheFacts: cacheStored };
 }
 
+/** Rejected outbound bodies have no reader; request cleanup without awaiting transport settlement. */
+function cancelUnusedResponseBody(res: Response): void {
+  try { void res.body?.cancel().catch(() => {}); } catch {}
+}
+
 const PEER_BODY_CAP = 8 * 1024 * 1024; // max DECOMPRESSED bytes accepted from one peer's sync delta
 
 // Pull deltas from every ALLOWLISTED peer (env.PEERS, operator-set https URLs - never user input, so no
@@ -813,7 +818,10 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
       let raw: string | null;
       try {
         const res = await fetch(`${peer}/hive/sync?since=${since}&cursor=${encodeURIComponent(requestCursor)}&limit=400&exclude=http`, { headers: { accept: "application/json" }, signal: ctl.signal, redirect: "manual" });
-        if (!res.ok) continue; // includes 3xx: a redirecting peer is not followed
+        if (!res.ok) {
+          cancelUnusedResponseBody(res);
+          continue; // includes 3xx: a redirecting peer is not followed
+        }
         raw = await readCappedText(res, PEER_BODY_CAP, { signal: ctl.signal, deadlineAt });
       } finally {
         clearTimeout(timer);
@@ -942,7 +950,10 @@ async function fetchTorznab(idx: IndexerCfg, query: string): Promise<string | nu
     // ASK for. Following a redirect would let an indexer 302 us to any host and bypass the allowlist entirely,
     // AND would leak the apikey in the forwarded query string to that host. An indexer that redirects fails.
     const res = await fetch(target, { headers: { accept: "application/rss+xml, application/xml, text/xml, application/json" }, signal: ctl.signal, redirect: "manual" });
-    if (!res.ok) return null; // includes 3xx: not followed
+    if (!res.ok) {
+      cancelUnusedResponseBody(res);
+      return null; // includes 3xx: not followed
+    }
     return await readCappedText(res, SCRAPE_BODY_CAP, { signal: ctl.signal, deadlineAt });
   } catch {
     return null;
