@@ -51,3 +51,5 @@ of the repo).
 `.github/workflows/ci.yml` runs the unit tests on every push/PR. Deploy is **manual**
 (`workflow_dispatch`) and requires the `CLOUDFLARE_API_TOKEN` repo secret. There is no auto-deploy while
 the add-on is dormant.
+
+The dormant federation repair requires additive migration `008_lossless_sync_and_receipts.sql` for an existing database. It preserves old rows/cursors/scores and requires upgraded v2 peers; see README for HTTP409 compatibility and historical attribution limits. Test pre-006 duplicate and post-006 unique-index fixtures before any activation. No activation is performed by the source repair.

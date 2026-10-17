@@ -1,7 +1,5 @@
--- Migration 006: enforce one report per (info_hash, service, reporter).
--- handleReport now INSERTs OR IGNORE against this unique index, so a single reporter counts ONCE per claim
--- (a re-signed/replayed report is idempotent) and cannot pad the reports table or the distinct-reporter
--- threshold. Mirrors the composite PK on cache_confirmations / http_confirmations / torrent_confirmations.
--- Non-destructive (additive index). Assumes a clean table (pre-deploy); if duplicate (info_hash, service,
--- reporter) rows already exist, dedupe them first (keep the lowest id) before this index will build.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_unique ON reports (info_hash, service, reporter);
+-- Migration 006: indexed report admission, including legacy duplicate report history.
+-- New Worker writes use one atomic INSERT ... WHERE NOT EXISTS; no destructive dedup is required.
+-- On an already-applied database its existing unique index remains intact. Migration 008 independently
+-- adds the new tables/indexes and preserves every existing row; editing 006 is not the sole upgrade path.
+CREATE INDEX IF NOT EXISTS idx_reports_unique ON reports (info_hash, service, reporter);

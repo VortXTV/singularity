@@ -1064,9 +1064,11 @@ export interface CacheFactCandidate {
 export interface IngestedFacts {
   torrents: CleanFact[]; // index facts (infohash<->title) + metadata; trust fields (cached/seeders) ignored on write
   torrentMeta: string[]; // the canonical metaId for each torrents[i] (parallel array; season-pack aware)
+  torrentTimes: number[]; // original peer observation times; never reset to local receipt time
   nzbs: CleanNzbFact[];
   nzbMeta: string[]; // canonical metaId for each nzbs[i]
-  health: Array<{ infoHash: string; seeders: number }>;
+  nzbTimes: number[];
+  health: Array<{ infoHash: string; seeders: number; lastSeen: number }>;
   cacheFacts: CacheFactCandidate[]; // SIGNED cache facts (self-verifying); the writer verifies each sig
 }
 
@@ -1085,6 +1087,18 @@ const MAX_INGEST_CACHE = 800; // each costs one WebCrypto verify in the writer, 
  * SAME validators as a direct contribution (sanitizeContribution / sanitizeNzbFact / normalizeInfoHash), so
  * a peer cannot inject markup, a tokenized url, a malformed hash, or a fake cache claim.
  */
+// Existing peers export DB-canonical CSV/JSON TEXT; direct contributors still use arrays/objects.
+// UTF-16 length ceilings cover every canonical producer value (<=119/71/2401 units).
+function peerCsvMetadata(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  return value.length <= 256 ? value.split(",") : [];
+}
+function peerEpisodeMetadata(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  if (value.length > 4096) return {};
+  try { return JSON.parse(value); } catch { return {}; }
+}
+
 export function ingestSyncDelta(delta: unknown): IngestedFacts {
   const d = (delta && typeof delta === "object" ? delta : {}) as Record<string, unknown>;
   const arr = (v: unknown, cap: number): Record<string, unknown>[] =>
@@ -1092,27 +1106,37 @@ export function ingestSyncDelta(delta: unknown): IngestedFacts {
 
   const torrents: CleanFact[] = [];
   const torrentMeta: string[] = [];
+  const torrentTimes: number[] = [];
+  const sourceTime = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
   for (const r of arr(d.torrents, MAX_INGEST_TORRENTS)) {
-    const clean = sanitizeContribution(r); // identical validation to a direct torrent contribution
+    const clean = sanitizeContribution({
+      ...r, tags: peerCsvMetadata(r.tags), languages: peerCsvMetadata(r.languages),
+      episodes: peerEpisodeMetadata(r.episodes),
+    }); // same strict direct validator after bounded peer-wire decoding only
     const key = metaKey(parseMetaId(typeof r.metaId === "string" ? r.metaId : ""));
     if (!clean || !key) continue;
     torrents.push(clean);
     torrentMeta.push(key);
+    torrentTimes.push(sourceTime(r.addedAt));
   }
   const nzbs: CleanNzbFact[] = [];
   const nzbMeta: string[] = [];
+  const nzbTimes: number[] = [];
   for (const r of arr(d.nzb, MAX_INGEST_NZB)) {
-    const clean = sanitizeNzbFact(r);
+    const clean = sanitizeNzbFact({
+      ...r, tags: peerCsvMetadata(r.tags), languages: peerCsvMetadata(r.languages),
+    });
     const key = metaKey(parseMetaId(typeof r.metaId === "string" ? r.metaId : ""));
     if (!clean || !key) continue;
     nzbs.push(clean);
     nzbMeta.push(key);
+    nzbTimes.push(sourceTime(r.addedAt));
   }
-  const health: Array<{ infoHash: string; seeders: number }> = [];
+  const health: Array<{ infoHash: string; seeders: number; lastSeen: number }> = [];
   for (const r of arr(d.health, MAX_INGEST_HEALTH)) {
     const hash = normalizeInfoHash(r.infoHash);
     const seeders = asInt(r.seeders);
-    if (hash && seeders != null) health.push({ infoHash: hash, seeders });
+    if (hash && seeders != null) health.push({ infoHash: hash, seeders, lastSeen: sourceTime(r.lastSeen) });
   }
   // SIGNED cache facts: shape the engine-native CacheFacts a peer relayed. Light field validation only - the
   // writer (recordSignedCacheFact) is authoritative: it verifies each fact's signature against its own
@@ -1141,7 +1165,7 @@ export function ingestSyncDelta(delta: unknown): IngestedFacts {
       sig,
     });
   }
-  return { torrents, torrentMeta, nzbs, nzbMeta, health, cacheFacts };
+  return { torrents, torrentMeta, torrentTimes, nzbs, nzbMeta, nzbTimes, health, cacheFacts };
 }
 
 // The visible trust leaderboard (gamify hosting - a locked federation decision). Shapes node rows into

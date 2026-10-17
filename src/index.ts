@@ -49,18 +49,17 @@ import {
   episodeFileIdx,
   parseCatalogSearch,
   corpusPresentImdbs,
-  assembleSyncDelta,
   ingestSyncDelta,
   type IngestedFacts,
   buildLeaderboard,
   buildStats,
-  reportsExceedThreshold,
-  reConfirmationVindicates,
   CACHE_TTL_MS,
   MIN_CONFIRMATIONS,
+  REPORT_THRESHOLD,
   PENALTY_BAN_THRESHOLD,
   type CorpusStream,
 } from "./corpus.ts";
+import { syncPage, decodeSyncCursor, emptySyncCursor, encodeSyncCursor, cursorCanAdvance } from "./sync.ts";
 import { decodeConfig, buildConfiguredManifest, type SingularityConfig } from "./config.ts";
 import { renderConfigurePage } from "./configure.ts";
 
@@ -353,41 +352,18 @@ async function handleStream(env: Env, type: string, idWithExt: string, config?: 
 // hash - the same trust tables serve both), then recompute the trusted count (non-barred, within TTL) and
 // upsert the cache fact. No self-attested bypass: a contributor counts as exactly one node.
 async function recordCache(env: Env, hash: string, service: string, nodeId: string, now: number): Promise<void> {
-  // Defensive: only a 40-hex torrent btih or a 32-hex nzb MD5 may key the trust tables (matches the
-  // schema CHECK), so a malformed hash from any future call-site can never pollute cache counts.
   if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(hash)) return;
-  // INSERT the confirmation + read the recomputed distinct-node count in ONE transaction (one round-trip, not
-  // two); the count sees the just-inserted row. n is kept in JS because it drives both the cache_facts value
-  // and the vindication branch below.
-  const batched = await env.DB.batch([
-    env.DB.prepare("INSERT INTO cache_confirmations (info_hash, service, node_id, ts) VALUES (?, ?, ?, ?) ON CONFLICT(info_hash, service, node_id) DO UPDATE SET ts = excluded.ts").bind(hash, service, nodeId, now),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM cache_confirmations cc JOIN nodes n ON n.id = cc.node_id WHERE cc.info_hash = ? AND cc.service = ? AND n.banned = 0 AND cc.ts > ?").bind(hash, service, now - CACHE_TTL_MS),
+  const vindicated = "(SELECT confirmations FROM cache_facts WHERE info_hash = ? AND service = ?) >= ? AND (SELECT COUNT(DISTINCT reporter) FROM reports WHERE info_hash = ? AND service = ?) >= ?";
+  const gate = [hash, service, MIN_CONFIRMATIONS, hash, service, REPORT_THRESHOLD];
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO cache_confirmations (info_hash, service, node_id, ts) VALUES (?, ?, ?, ?) ON CONFLICT(info_hash, service, node_id) DO UPDATE SET ts = MAX(cache_confirmations.ts, excluded.ts)").bind(hash, service, nodeId, now),
+    env.DB.prepare("INSERT INTO cache_facts (info_hash, service, cached, confirmations, last_verified) SELECT ?, ?, 1, COUNT(*), ? FROM cache_confirmations cc JOIN nodes n ON n.id = cc.node_id WHERE cc.info_hash = ? AND cc.service = ? AND n.banned = 0 AND cc.ts > ? ON CONFLICT(info_hash, service) DO UPDATE SET cached = 1, confirmations = excluded.confirmations, last_verified = MAX(cache_facts.last_verified, excluded.last_verified)").bind(hash, service, now, hash, service, now - CACHE_TTL_MS),
+    env.DB.prepare("UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT DISTINCT reporter FROM reports WHERE info_hash = ? AND service = ?) AND " + vindicated).bind(hash, service, ...gate),
+    env.DB.prepare("UPDATE nodes SET banned = 1 WHERE banned = 0 AND penalties >= ?").bind(PENALTY_BAN_THRESHOLD),
+    env.DB.prepare("INSERT OR IGNORE INTO report_history (report_id, info_hash, service, reporter, ts, resolved_at) SELECT id, info_hash, service, reporter, ts, ? FROM reports WHERE info_hash = ? AND service = ? AND " + vindicated).bind(now, hash, service, ...gate),
+    env.DB.prepare("UPDATE report_history SET resolved_at = ? WHERE report_id IN (SELECT id FROM reports WHERE info_hash = ? AND service = ?) AND " + vindicated).bind(now, hash, service, ...gate),
+    env.DB.prepare("DELETE FROM reports WHERE info_hash = ? AND service = ? AND " + vindicated).bind(hash, service, ...gate),
   ]);
-  const n = (batched[1].results?.[0] as { n: number } | undefined)?.n ?? 1;
-  await env.DB.prepare(
-    "INSERT INTO cache_facts (info_hash, service, cached, confirmations, last_verified) VALUES (?, ?, 1, ?, ?) " +
-      "ON CONFLICT(info_hash, service) DO UPDATE SET cached = 1, confirmations = excluded.confirmations, last_verified = excluded.last_verified",
-  )
-    .bind(hash, service, n, now)
-    .run();
-  // False-reporter counter-signal: if this confirmation re-establishes a claim that distinct reporters had
-  // crowd-rejected (handleReport demoted it + cleared its confirmations), a FRESH distinct-node crowd has now
-  // overruled them. Penalize those reporters, ban repeat offenders, and clear the now-adjudicated reports so
-  // they cannot re-demote the claim or be penalized twice. This makes reporting costly to abuse (griefing).
-  if (n >= MIN_CONFIRMATIONS) {
-    const rc = await env.DB.prepare("SELECT COUNT(DISTINCT reporter) AS n FROM reports WHERE info_hash = ? AND service = ?")
-      .bind(hash, service)
-      .first<{ n: number }>();
-    if (reConfirmationVindicates(n, rc?.n ?? 0)) {
-      await env.DB.prepare(
-        "UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT DISTINCT reporter FROM reports WHERE info_hash = ? AND service = ?)",
-      )
-        .bind(hash, service)
-        .run();
-      await env.DB.prepare("UPDATE nodes SET banned = 1 WHERE banned = 0 AND penalties >= ?").bind(PENALTY_BAN_THRESHOLD).run();
-      await env.DB.prepare("DELETE FROM reports WHERE info_hash = ? AND service = ?").bind(hash, service).run();
-    }
-  }
 }
 
 // Store a contributor's self-contained Ed25519-signed CacheFact verbatim (the engine-native artifact) so
@@ -396,44 +372,57 @@ async function recordCache(env: Env, hash: string, service: string, nodeId: stri
 // (signerPubkeyB64 = the contribution pubKey). Enforces the engine's clock-skew guard. Returns true if stored.
 // This is ADDITIVE to recordCache (Singularity's own count-based read-side trust); a fact lacking a per-fact
 // sig still records a plain confirmation but produces no engine-mergeable artifact.
-async function recordSignedCacheFact(
-  env: Env,
-  f: { infohash: string; service: string; cached: boolean; fileIdx: number; size: number | null; quality: string | null; verifiedAt: number; ttl: number },
+type SignedCacheFactInput = { infohash: string; service: string; cached: boolean; fileIdx: number; size: number | null; quality: string | null; verifiedAt: number; ttl: number };
+
+// No DB effects: distinguish a valid future observation from permanently filtered input.
+async function signedCacheFactAdmission(
+  f: SignedCacheFactInput,
   signerPubkeyB64: string,
   sigB64: string,
   now: number,
-): Promise<boolean> {
-  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(f.infohash) || !HIVE_DEBRID_SERVICES.includes(f.service)) return false;
+): Promise<"invalid" | "future" | "ready"> {
+  if (!/^([a-f0-9]{32}|[a-f0-9]{40})$/.test(f.infohash) || !HIVE_DEBRID_SERVICES.includes(f.service)) return "invalid";
   // signer must be a 32-byte ed25519 key as base64url no-pad (43 chars) - the engine format. This also
   // forecloses any canonical-injection path (a '|' or control char in signer_pubkey can't pass this charset).
-  if (!/^[A-Za-z0-9_-]{43}$/.test(signerPubkeyB64)) return false;
-  if (!Number.isFinite(f.verifiedAt) || !Number.isFinite(f.ttl)) return false;
+  if (!/^[A-Za-z0-9_-]{43}$/.test(signerPubkeyB64)) return "invalid";
+  if (!Number.isFinite(f.verifiedAt) || !Number.isFinite(f.ttl)) return "invalid";
   const nowSec = Math.floor(now / 1000);
   // ttl must be positive AND within the engine's 6h public cap; verified_at within [now-cap, now+skew] so a
   // node cannot store a never-expiring fact or an epoch-era one (the engine caps on merge; we cap on ingest).
-  if (f.ttl <= 0 || f.ttl > PUBLIC_TTL_CAP_SECS) return false;
-  if (f.verifiedAt > nowSec + MAX_SKEW_SECS || f.verifiedAt < nowSec - PUBLIC_TTL_CAP_SECS) return false;
+  if (f.ttl <= 0 || f.ttl > PUBLIC_TTL_CAP_SECS) return "invalid";
+  if (f.verifiedAt < nowSec - PUBLIC_TTL_CAP_SECS) return "invalid";
   // quality rides mid-payload in the |-delimited signing bytes, so it must not contain '|' or control chars.
-  if (f.quality != null && (f.quality.length > 16 || /[|\x00-\x1f]/.test(f.quality))) return false;
+  if (f.quality != null && (f.quality.length > 16 || /[|\x00-\x1f]/.test(f.quality))) return "invalid";
   const signingStr = cacheFactSigningString({ infohash: f.infohash, service: f.service, cached: f.cached, fileIdx: f.fileIdx < 0 ? null : f.fileIdx, size: f.size, quality: f.quality, verifiedAt: f.verifiedAt, ttl: f.ttl, signerPubkey: signerPubkeyB64 });
   try {
     const key = await crypto.subtle.importKey("raw", unb64(signerPubkeyB64) as BufferSource, { name: "Ed25519" }, false, ["verify"]);
     const ok = await crypto.subtle.verify({ name: "Ed25519" }, key, unb64(sigB64) as BufferSource, enc(signingStr));
-    if (!ok) return false;
+    if (!ok) return "invalid";
   } catch {
-    return false;
+    return "invalid";
   }
+  return f.verifiedAt > nowSec + MAX_SKEW_SECS ? "future" : "ready";
+}
+
+async function recordSignedCacheFact(
+  env: Env,
+  f: SignedCacheFactInput,
+  signerPubkeyB64: string,
+  sigB64: string,
+  now: number,
+): Promise<boolean> {
+  if (await signedCacheFactAdmission(f, signerPubkeyB64, sigB64, now) !== "ready") return false;
   // LWW: only overwrite an existing fact from this signer with a strictly newer verified_at.
-  await env.DB.prepare(
+  const stored = await env.DB.prepare(
     "INSERT INTO signed_cache_facts (info_hash, service, file_idx, signer_pubkey, cached, size, quality, verified_at, ttl, sig, stored_at) " +
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
       "ON CONFLICT(info_hash, service, file_idx, signer_pubkey) DO UPDATE SET " +
       "cached = excluded.cached, size = excluded.size, quality = excluded.quality, verified_at = excluded.verified_at, " +
-      "ttl = excluded.ttl, sig = excluded.sig, stored_at = excluded.stored_at WHERE excluded.verified_at > signed_cache_facts.verified_at",
+      "ttl = excluded.ttl, sig = excluded.sig, stored_at = MAX(signed_cache_facts.stored_at + 1, excluded.stored_at) WHERE excluded.verified_at > signed_cache_facts.verified_at",
   )
     .bind(f.infohash, f.service, f.fileIdx, signerPubkeyB64, f.cached ? 1 : 0, f.size, f.quality, f.verifiedAt, f.ttl, sigB64, now)
     .run();
-  return true;
+  return (stored.meta?.changes ?? 0) > 0;
 }
 
 // An HTTP URL is played verbatim by every client, so it is gated like the cache: record a DISTINCT-node
@@ -464,6 +453,11 @@ async function recordTorrentConfirmation(env: Env, infoHash: string, metaId: str
   ]);
 }
 
+// The receipt PK and DB trigger award one credit per node/source association, including concurrent replays.
+async function recordContributionCredit(env: Env, nodeId: string, kind: string, sourceKey: string, metaId: string): Promise<void> {
+  await env.DB.prepare("INSERT OR IGNORE INTO contribution_receipts (node_id, kind, source_key, meta_id) VALUES (?, ?, ?, ?)").bind(nodeId, kind, sourceKey, metaId).run();
+}
+
 async function handleContribute(req: Request, env: Env, ip: string): Promise<Response> {
   const limited = await throttleWrite(env, "contribute", ip);
   if (limited) return limited;
@@ -492,7 +486,9 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
   }
 
   let accepted = 0;
-  for (const raw of facts as Array<Record<string, unknown>>) {
+  for (const member of facts) {
+    if (!member || typeof member !== "object" || Array.isArray(member)) continue;
+    const raw = member as Record<string, unknown>;
     // metaId is a property of each (signed) fact, so it is covered by the signature over JSON(facts);
     // a relay cannot swap which title a source claims to serve without breaking the sig.
     const meta = parseMetaId(typeof raw.metaId === "string" ? raw.metaId : "");
@@ -501,6 +497,7 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     // whole-season torrent be stored once and surfaced for every episode of that season (handleStream).
     const metaId = metaKey(meta) as string;
     const kind = typeof raw.kind === "string" ? raw.kind : "torrent";
+    if (kind !== "torrent" && kind !== "http" && kind !== "nzb") continue;
 
     if (kind === "http") {
       // HTTP/direct: a STABLE PUBLIC stream URL (tokenless, enforced by sanitizeHttpFact). Gated behind
@@ -511,11 +508,12 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
         "INSERT INTO http_streams (url, meta_id, quality, size, source, tags, languages, confirmations, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?) " +
           "ON CONFLICT(url, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, http_streams.quality), " +
           "size = COALESCE(excluded.size, http_streams.size), source = COALESCE(excluded.source, http_streams.source), " +
-          "tags = COALESCE(excluded.tags, http_streams.tags), languages = COALESCE(excluded.languages, http_streams.languages), added_at = excluded.added_at",
+          "tags = COALESCE(excluded.tags, http_streams.tags), languages = COALESCE(excluded.languages, http_streams.languages), added_at = MAX(http_streams.added_at + 1, excluded.added_at)",
       )
         .bind(hf.url, metaId, hf.quality, hf.size, hf.source, hf.tags.length ? hf.tags.join(",") : null, hf.languages.length ? hf.languages.join(",") : null, now)
         .run();
       await recordHttpConfirmation(env, hf.url, metaId, nodeId, now);
+      await recordContributionCredit(env, nodeId, "http", hf.url, metaId);
       accepted++;
       continue;
     }
@@ -528,7 +526,7 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
         "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, tags, languages, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT(nzb_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, nzbs.quality), " +
           "size = COALESCE(excluded.size, nzbs.size), source = COALESCE(excluded.source, nzbs.source), " +
-          "tags = COALESCE(excluded.tags, nzbs.tags), languages = COALESCE(excluded.languages, nzbs.languages), added_at = excluded.added_at",
+          "tags = COALESCE(excluded.tags, nzbs.tags), languages = COALESCE(excluded.languages, nzbs.languages), added_at = MAX(nzbs.added_at + 1, excluded.added_at)",
       )
         .bind(nf.nzbHash, metaId, nf.quality, nf.size, nf.source, nf.tags.length ? nf.tags.join(",") : null, nf.languages.length ? nf.languages.join(",") : null, now)
         .run();
@@ -537,6 +535,7 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
       if (nf.service && typeof raw.cacheSig === "string") {
         await recordSignedCacheFact(env, { infohash: nf.nzbHash, service: nf.service, cached: nf.cached, fileIdx: -1, size: nf.size, quality: nf.quality, verifiedAt: Number(raw.verifiedAt), ttl: Number(raw.ttl) }, pubKey, raw.cacheSig, now);
       }
+      await recordContributionCredit(env, nodeId, "nzb", nf.nzbHash, metaId);
       accepted++;
       continue;
     }
@@ -549,7 +548,7 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
       "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(info_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, torrents.quality), " +
         "size = COALESCE(excluded.size, torrents.size), source = COALESCE(excluded.source, torrents.source), " +
-        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), episodes = COALESCE(excluded.episodes, torrents.episodes), added_at = excluded.added_at",
+        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), episodes = COALESCE(excluded.episodes, torrents.episodes), added_at = MAX(torrents.added_at + 1, excluded.added_at)",
     )
       .bind(clean.infoHash, metaId, clean.quality, clean.size, clean.source, clean.fileIdx, clean.tags.length ? clean.tags.join(",") : null, clean.languages.length ? clean.languages.join(",") : null, Object.keys(clean.episodes).length ? JSON.stringify(clean.episodes) : null, now)
       .run();
@@ -559,7 +558,7 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     if (clean.seeders != null) {
       await env.DB.prepare(
         "INSERT INTO health (info_hash, seeders, last_seen) VALUES (?, ?, ?) " +
-          "ON CONFLICT(info_hash) DO UPDATE SET seeders = excluded.seeders, last_seen = excluded.last_seen",
+          "ON CONFLICT(info_hash) DO UPDATE SET seeders = excluded.seeders, last_seen = MAX(health.last_seen + 1, excluded.last_seen)",
       )
         .bind(clean.infoHash, clean.seeders, now)
         .run();
@@ -570,10 +569,9 @@ async function handleContribute(req: Request, env: Env, ip: string): Promise<Res
     if (clean.service && typeof raw.cacheSig === "string") {
       await recordSignedCacheFact(env, { infohash: clean.infoHash, service: clean.service, cached: clean.cached, fileIdx: clean.fileIdx ?? -1, size: clean.size, quality: clean.quality, verifiedAt: Number(raw.verifiedAt), ttl: Number(raw.ttl) }, pubKey, raw.cacheSig, now);
     }
+    await recordContributionCredit(env, nodeId, "torrent", clean.infoHash, metaId);
     accepted++;
   }
-  // Credit the node for accepted facts (drives the leaderboard / "give to get").
-  if (accepted > 0) await env.DB.prepare("UPDATE nodes SET contributions = contributions + ?, last_seen = ? WHERE id = ?").bind(accepted, now, nodeId).run();
   return json({ accepted, stored: true });
 }
 
@@ -614,32 +612,17 @@ async function handleReport(req: Request, env: Env, ip: string): Promise<Respons
   // reports for arbitrary hash+service pairs.
   const fact = await env.DB.prepare("SELECT 1 AS ok FROM cache_facts WHERE info_hash = ? AND service = ?").bind(infoHash, service).first<{ ok: number }>();
   if (!fact) return json({ error: "no_such_claim" }, 404);
-  // INSERT OR IGNORE against the (info_hash, service, reporter) unique index: a reporter counts ONCE per
-  // claim, so a re-signed/replayed report is idempotent and cannot pad the table or the distinct count.
-  await env.DB.prepare("INSERT OR IGNORE INTO reports (info_hash, service, reporter, ts) VALUES (?, ?, ?, ?)")
-    .bind(infoHash, service, reporter, now)
-    .run();
-
-  // Crowd adjudication: the Worker can't re-check a debrid itself (no keys), so DISTINCT reporters are the
-  // counter-signal to the distinct confirmers. Once enough independent reporters flag a claim, it is
-  // crowd-rejected: demote the cache fact, penalize every node that confirmed it, ban repeat offenders,
-  // and clear the confirmations so re-trust requires fresh ones.
-  const rc = await env.DB.prepare("SELECT COUNT(DISTINCT reporter) AS n FROM reports WHERE info_hash = ? AND service = ?")
-    .bind(infoHash, service)
-    .first<{ n: number }>();
-  if (reportsExceedThreshold(rc?.n ?? 0)) {
-    await env.DB.prepare("UPDATE cache_facts SET cached = 0, confirmations = 0 WHERE info_hash = ? AND service = ?").bind(infoHash, service).run();
-    // Penalize only confirmers whose confirmation is still within the TTL window (i.e. still counts toward
-    // trust at read time) - mirrors the trust-count query in recordCache so the penalty matches the gate,
-    // instead of also hitting nodes whose confirmation expired long ago.
-    await env.DB.prepare(
-      "UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT node_id FROM cache_confirmations WHERE info_hash = ? AND service = ? AND ts > ?)",
-    )
-      .bind(infoHash, service, now - CACHE_TTL_MS)
-      .run();
-    await env.DB.prepare("UPDATE nodes SET banned = 1 WHERE banned = 0 AND penalties >= ?").bind(PENALTY_BAN_THRESHOLD).run();
-    await env.DB.prepare("DELETE FROM cache_confirmations WHERE info_hash = ? AND service = ?").bind(infoHash, service).run();
-  }
+  // One atomic transaction serializes threshold decisions, penalties, demotion and confirmation clearing.
+  // NOT EXISTS enforces admission even on pre-006 databases retaining duplicate historical reports.
+  const rejected = "(SELECT COUNT(DISTINCT reporter) FROM reports WHERE info_hash = ? AND service = ?) >= ?";
+  const gate = [infoHash, service, REPORT_THRESHOLD];
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO reports (info_hash, service, reporter, ts) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM reports WHERE info_hash = ? AND service = ? AND reporter = ?)").bind(infoHash, service, reporter, now, infoHash, service, reporter),
+    env.DB.prepare("UPDATE nodes SET penalties = penalties + 1 WHERE id IN (SELECT node_id FROM cache_confirmations WHERE info_hash = ? AND service = ? AND ts > ?) AND " + rejected).bind(infoHash, service, now - CACHE_TTL_MS, ...gate),
+    env.DB.prepare("UPDATE nodes SET banned = 1 WHERE banned = 0 AND penalties >= ?").bind(PENALTY_BAN_THRESHOLD),
+    env.DB.prepare("UPDATE cache_facts SET cached = 0, confirmations = 0 WHERE info_hash = ? AND service = ? AND " + rejected).bind(infoHash, service, ...gate),
+    env.DB.prepare("DELETE FROM cache_confirmations WHERE info_hash = ? AND service = ? AND " + rejected).bind(infoHash, service, ...gate),
+  ]);
   // Penalties stay invisible to the user; the response never reveals whether one was applied.
   return json({ recorded: true });
 }
@@ -731,21 +714,14 @@ async function handleCatalog(env: Env, type: string, idRaw: string): Promise<Res
 // (assembleSyncDelta re-applies the whitelist). Per-IP throttled; cursor-paginated via ?since=&limit=.
 async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
   if (env.RL && !(await env.RL.limit({ key: `sync:${ip}` })).success) return json({ error: "rate_limited" }, 429);
-  const since = Math.max(0, Number(url.searchParams.get("since") ?? "0") || 0);
-  const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") ?? "500") || 500));
-  type Row = Record<string, unknown>;
-  const q = (sql: string) => env.DB.prepare(sql).bind(since, limit).all<Row>();
-  const [torrents, cache, health, http, nzb] = await Promise.all([
-    q("SELECT info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at FROM torrents WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
-    q("SELECT info_hash, service, file_idx, signer_pubkey, cached, size, quality, verified_at, ttl, sig, stored_at FROM signed_cache_facts WHERE stored_at > ? ORDER BY stored_at ASC LIMIT ?"),
-    q("SELECT info_hash, seeders, last_seen FROM health WHERE last_seen > ? ORDER BY last_seen ASC LIMIT ?"),
-    q("SELECT url, meta_id, quality, size, source, tags, languages, added_at FROM http_streams WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
-    q("SELECT nzb_hash, meta_id, quality, size, source, tags, languages, added_at FROM nzbs WHERE added_at > ? ORDER BY added_at ASC LIMIT ?"),
-  ]);
-  const delta = assembleSyncDelta(
-    { torrents: torrents.results ?? [], cache: cache.results ?? [], health: health.results ?? [], http: http.results ?? [], nzb: nzb.results ?? [] },
-    since,
-  );
+  const since = Number(url.searchParams.get("since") ?? "0");
+  if (!Number.isSafeInteger(since) || since < 0) return json({ error: "bad_cursor" }, 400);
+  const limit = Math.min(1000, Math.max(1, Math.floor(Number(url.searchParams.get("limit") ?? "500") || 500)));
+  const raw = url.searchParams.get("cursor");
+  const cursor = raw === null ? null : decodeSyncCursor(raw);
+  if (raw !== null && !cursor) return json({ error: "bad_cursor" }, 400);
+  const delta = await syncPage(env.DB, since, limit, cursor, url.searchParams.get("exclude") === "http");
+  if (!delta) return json({ error: "sync_cursor_upgrade_required", cursorVersion: 2, restartCursor: "0" }, 409);
   return json(delta, 200, false);
 }
 
@@ -756,6 +732,20 @@ async function handleSync(env: Env, url: URL, ip: string): Promise<Response> {
 // NOTE: the torrent/nzb INDEX facts carry no node attribution; their unsigned `cached`/`service` fields are
 // deliberately NOT used as trust. The ONLY cache trust ingested from a peer is the SIGNED CacheFacts below,
 // each re-verified by recordSignedCacheFact - a peer relays attestations, it cannot mint them.
+// A v2 journal position acknowledges the entire page. Defer before any fact writes when a
+// valid observation is only temporarily outside our future-skew window; keep its original time.
+async function peerPageIsFuture(ing: IngestedFacts, now: number): Promise<boolean> {
+  if (ing.torrentTimes.some((time) => time > now + SIG_WINDOW_MS)
+    || ing.nzbTimes.some((time) => time > now + SIG_WINDOW_MS)
+    || ing.health.some((fact) => fact.lastSeen > now + SIG_WINDOW_MS)) return true;
+  const nowSec = Math.floor(now / 1000);
+  for (const fact of ing.cacheFacts) {
+    if (fact.verifiedAt > nowSec + MAX_SKEW_SECS
+      && await signedCacheFactAdmission(fact, fact.signerPubkey, fact.sig, now) === "future") return true;
+  }
+  return false;
+}
+
 async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promise<{ torrents: number; nzbs: number; health: number; cacheFacts: number }> {
   for (let i = 0; i < ing.torrents.length; i++) {
     const c = ing.torrents[i];
@@ -763,9 +753,9 @@ async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promi
       "INSERT INTO torrents (info_hash, meta_id, quality, size, source, file_idx, tags, languages, episodes, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(info_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, torrents.quality), " +
         "size = COALESCE(excluded.size, torrents.size), source = COALESCE(excluded.source, torrents.source), " +
-        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), episodes = COALESCE(excluded.episodes, torrents.episodes), added_at = excluded.added_at",
+        "file_idx = COALESCE(excluded.file_idx, torrents.file_idx), tags = COALESCE(excluded.tags, torrents.tags), languages = COALESCE(excluded.languages, torrents.languages), episodes = COALESCE(excluded.episodes, torrents.episodes), added_at = excluded.added_at WHERE excluded.added_at > torrents.added_at",
     )
-      .bind(c.infoHash, ing.torrentMeta[i], c.quality, c.size, c.source, c.fileIdx, c.tags.length ? c.tags.join(",") : null, c.languages.length ? c.languages.join(",") : null, Object.keys(c.episodes).length ? JSON.stringify(c.episodes) : null, now)
+      .bind(c.infoHash, ing.torrentMeta[i], c.quality, c.size, c.source, c.fileIdx, c.tags.length ? c.tags.join(",") : null, c.languages.length ? c.languages.join(",") : null, Object.keys(c.episodes).length ? JSON.stringify(c.episodes) : null, ing.torrentTimes[i])
       .run();
   }
   for (let i = 0; i < ing.nzbs.length; i++) {
@@ -773,16 +763,16 @@ async function ingestPeerDelta(env: Env, ing: IngestedFacts, now: number): Promi
     await env.DB.prepare(
       "INSERT INTO nzbs (nzb_hash, meta_id, quality, size, source, tags, languages, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(nzb_hash, meta_id) DO UPDATE SET quality = COALESCE(excluded.quality, nzbs.quality), size = COALESCE(excluded.size, nzbs.size), " +
-        "source = COALESCE(excluded.source, nzbs.source), tags = COALESCE(excluded.tags, nzbs.tags), languages = COALESCE(excluded.languages, nzbs.languages), added_at = excluded.added_at",
+        "source = COALESCE(excluded.source, nzbs.source), tags = COALESCE(excluded.tags, nzbs.tags), languages = COALESCE(excluded.languages, nzbs.languages), added_at = excluded.added_at WHERE excluded.added_at > nzbs.added_at",
     )
-      .bind(c.nzbHash, ing.nzbMeta[i], c.quality, c.size, c.source, c.tags.length ? c.tags.join(",") : null, c.languages.length ? c.languages.join(",") : null, now)
+      .bind(c.nzbHash, ing.nzbMeta[i], c.quality, c.size, c.source, c.tags.length ? c.tags.join(",") : null, c.languages.length ? c.languages.join(",") : null, ing.nzbTimes[i])
       .run();
   }
   for (const h of ing.health) {
     await env.DB.prepare(
-      "INSERT INTO health (info_hash, seeders, last_seen) VALUES (?, ?, ?) ON CONFLICT(info_hash) DO UPDATE SET seeders = excluded.seeders, last_seen = excluded.last_seen",
+      "INSERT INTO health (info_hash, seeders, last_seen) VALUES (?, ?, ?) ON CONFLICT(info_hash) DO UPDATE SET seeders = excluded.seeders, last_seen = excluded.last_seen WHERE excluded.last_seen > health.last_seen",
     )
-      .bind(h.infoHash, h.seeders, now)
+      .bind(h.infoHash, h.seeders, h.lastSeen)
       .run();
   }
   // SIGNED cache facts: safe to ingest from a peer because each self-verifies against its ORIGINAL signer.
@@ -856,6 +846,10 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
     try {
       const row = await env.DB.prepare("SELECT cursor FROM peers WHERE url = ?").bind(peer).first<{ cursor: number }>();
       const since = row?.cursor ?? 0;
+      const saved = await env.DB.prepare("SELECT cursor FROM peer_sync_cursors WHERE url = ?").bind(peer).first<{ cursor: string }>();
+      const position = saved ? decodeSyncCursor(saved.cursor) : emptySyncCursor();
+      if (!position) continue;
+      const requestCursor = saved?.cursor ?? "0";
       // Bound a slow/hostile peer: abort after 8s, and cap the body AS IT STREAMS (a gzip bomb could OOM the
       // isolate). redirect:"manual" is load-bearing: the operator PEERS allowlist is the SSRF bound, and
       // following a redirect would let an allowlisted-but-hostile peer 302 this fetch to an arbitrary host and
@@ -864,7 +858,7 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
       const timer = setTimeout(() => ctl.abort(), 8000);
       let raw: string | null;
       try {
-        const res = await fetch(`${peer}/hive/sync?since=${since}&limit=500`, { headers: { accept: "application/json" }, signal: ctl.signal, redirect: "manual" });
+        const res = await fetch(`${peer}/hive/sync?since=${since}&cursor=${encodeURIComponent(requestCursor)}&limit=400&exclude=http`, { headers: { accept: "application/json" }, signal: ctl.signal, redirect: "manual" });
         if (!res.ok) continue; // includes 3xx: a redirecting peer is not followed
         raw = await readCappedText(res, PEER_BODY_CAP);
       } finally {
@@ -877,14 +871,31 @@ async function pullFromPeers(env: Env, now: number): Promise<{ peers: number; to
       } catch {
         continue;
       }
-      if (!delta) continue;
-      const got = await ingestPeerDelta(env, ingestSyncDelta(delta), now);
+      if (!delta || typeof delta !== "object" || (delta as { cursorVersion?: unknown }).cursorVersion !== 2) continue;
+      const nextCursor = (delta as { nextCursor?: unknown }).nextCursor;
+      const nextPosition = decodeSyncCursor(nextCursor);
+      if (!nextPosition || !cursorCanAdvance(position, nextPosition, now)) continue;
+      // A peer must honor the requested bound and supply facts for every advancing supported stream.
+      // Otherwise the sanitizer could truncate valid rows while the checkpoint skipped past them.
+      const packet = delta as Record<string, unknown>;
+      if (["torrents", "cache", "health", "nzb"].some((name) => {
+        const rows = packet[name];
+        const advanced = nextPosition[name][0] > position[name][0];
+        if (rows === undefined) return advanced;
+        return !Array.isArray(rows) || rows.length > 400 || (advanced && rows.length === 0);
+      })) continue;
+      // HTTP trust is locally earned; never acknowledge a stream this peer reader cannot ingest.
+      nextPosition.http = [...position.http];
+      const ing = ingestSyncDelta(delta);
+      if (await peerPageIsFuture(ing, now)) continue;
+      const got = await ingestPeerDelta(env, ing, now);
       // Cap the peer-returned cursor so a hostile peer cannot jump it to MAX_SAFE_INTEGER and starve future
       // pulls; Math.max prevents it going backwards (no re-ingest of already-seen data).
       const peerCursor = typeof (delta as { cursor?: unknown }).cursor === "number" ? Math.min((delta as { cursor: number }).cursor, now + 60_000) : since;
-      await env.DB.prepare("INSERT INTO peers (url, cursor, last_pull) VALUES (?, ?, ?) ON CONFLICT(url) DO UPDATE SET cursor = excluded.cursor, last_pull = excluded.last_pull")
-        .bind(peer, Math.max(since, peerCursor), now)
-        .run();
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO peers (url, cursor, last_pull) VALUES (?, ?, ?) ON CONFLICT(url) DO UPDATE SET cursor = MAX(peers.cursor, excluded.cursor), last_pull = MAX(peers.last_pull, excluded.last_pull)").bind(peer, Math.max(since, peerCursor), now),
+        env.DB.prepare("INSERT INTO peer_sync_cursors (url, cursor) VALUES (?, ?) ON CONFLICT(url) DO UPDATE SET cursor = excluded.cursor WHERE peer_sync_cursors.cursor = ?").bind(peer, encodeSyncCursor(nextPosition), saved?.cursor ?? null),
+      ]);
       totals.peers++;
       totals.torrents += got.torrents;
       totals.nzbs += got.nzbs;
@@ -1181,12 +1192,9 @@ async function handleSourceProbe(req: Request, env: Env, ip: string): Promise<Re
   if (reg) {
     // Cap the registry so a crowd of nodes can't exhaust D1 with junk sources. A NEW source is refused past
     // the cap; an EXISTING source (idempotent re-register) and all probing are unaffected.
-    const cnt = await env.DB.prepare("SELECT COUNT(*) AS n FROM sources").first<{ n: number }>();
-    if ((cnt?.n ?? 0) < MAX_SOURCES) {
-      await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, kind, category, url, added_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(reg.id, reg.name, reg.kind, reg.category, reg.url, now)
-        .run();
-    }
+    await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, kind, category, url, added_at) SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM sources) < ?")
+      .bind(reg.id, reg.name, reg.kind, reg.category, reg.url, now, MAX_SOURCES)
+      .run();
   }
   const exists = await env.DB.prepare("SELECT 1 AS ok FROM sources WHERE id = ?").bind(sourceId).first<{ ok: number }>();
   if (!exists) return json({ error: "no_such_source" }, 404);

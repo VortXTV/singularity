@@ -182,3 +182,27 @@ content (the corpus stores infohash metadata only).
   **non-goal**: evaluating user-supplied expressions in a public Worker is an injection / maintenance
   liability. The same intent is served by explicit, safe options (resolution allowlist, per-tag and
   source-type include/exclude, result limits, sort order).
+
+## Dormant federation repair: publication cursor v2 and database safety
+
+The separate [peer acknowledgement safety note](docs/peer-ack-safety.md) explains whole-page
+deferral for temporarily future observations and the saved current-source regression.
+
+The [peer metadata compatibility note](docs/peer-metadata.md) covers bounded decoding of the
+existing CSV/JSON TEXT wire fields before unchanged strict contribution sanitizers.
+
+This remains source-only dormant groundwork. No database creation, migration, secret, cron, route or deployment is activated by these changes.
+
+GET /hive/sync?cursor=0&limit=400 returns cursorVersion:2, nextCursor and hasMore alongside the existing fact arrays/numeric cursor. Carry nextCursor unchanged in the next request's cursor parameter. Each of the five streams advances by its independent local publication sequence in the append-only sync_publications journal. Insert/update triggers retain whitelisted immutable snapshots; original addedAt/lastSeen remain in payloads. A late fact with an older source time, or a same-time key sorting before a previous page, still receives a new publication sequence. Migration008 seeds every legacy current row once and preserves publication history. There is no automatic journal deletion; retention/compaction needs a separately reviewed reader/bootstrap policy before future activation.
+
+Public sync exports all five streams. Peer replication intentionally supports only torrent/NZB index, health and signed cache facts: HTTP URLs and their trust gate stay locally earned. Peer requests send exclude=http, which returns an empty HTTP array and keeps its cursor position unchanged. The puller also refuses to acknowledge HTTP positions from a peer that ignores that exclusion. No claim of five-stream peer ingestion is made.
+
+The peer puller restarts v2 at zero when no opaque cursor exists, recovering historical rows skipped by the former scalar cursor. Legacy peers.cursor values, corpus rows and scores remain intact. Legacy since=0 requests can return a bounded full bootstrap if every stream fits the limit. All legacy incremental since>0 requests and truncated legacy bootstraps return HTTP409 with {error:"sync_cursor_upgrade_required",cursorVersion:2,restartCursor:"0"}; no partial page is emitted. A source-time scalar cannot represent late arrivals even when a page is untruncated. Old clients must upgrade and rebootstrap. Upgraded pullers require a v2 response and reject legacy-only JSON, HTTP409 and invalid/backwards positions before ingestion. Every supported incoming stream is bounded to the requested 400 members; advancing positions require a present nonempty array. Oversized, nonarray or advancing missing/empty packets are rejected before any ingestion or checkpoint update. Missing supported arrays with unchanged positions remain compatible. On ingestion/database failure neither cursor advances; already committed idempotent facts are safely replayed on retry. last_pull records successful pulls only.
+
+Migration008 is independently additive on pre006 and post006 databases. It preserves every active report ID/duplicate and copies them into report_history without changing historical scores. Pending006 accepts duplicate legacy rows; an existing applied unique index remains intact. Vindication archives report IDs/fields in the same transaction before clearing their active signals. Rejection and vindication each commit complete penalty/state transitions atomically.
+
+Contribution credit now means one distinct node/source association for torrent, HTTP or NZB. Replays refresh observations/confirmations but add no credit, including concurrent re-signing. Health/cache fields within an accepted torrent/NZB envelope were not separate accepted facts and share its receipt. Existing counters are preserved; attributable torrent/HTTP and cache-confirmed NZB associations are seeded without credit. Legacy NZB associations without node attribution cannot be reconstructed: first post-upgrade attribution can earn one credit.
+
+Peer index/health events retain original timestamps; missing legacy times become zero. Equal/older events do not rewrite storage or publish another snapshot. Direct observations use locally monotonic per-row timestamps, including same-clock updates. Apply and verify migration008 against disposable and staging fixtures before any future activation. Source/SQL tests do not authorize activation or prove remote provider behavior.
+
+Tests: npm test includes actual Worker handlers over real in-memory SQLite, malformed signed members, migration preservation, ties/late arrivals, replay credit, concurrent report/source admission and rollback boundaries. npm run test:workerd additionally uses local Miniflare/D1 with outbound access blocked; supply MINIFLARE_MODULE if it is not installed at the development machine's Wrangler path. No production binding is used by these tests.
